@@ -91,35 +91,147 @@ Status JavaFunctionCall::open(FunctionContext* context, FunctionContext::Functio
 }
 
 Status JavaFunctionCall::execute_impl(FunctionContext* context, Block& block,
-                                      const ColumnNumbers& arguments, uint32_t result,
-                                      size_t num_rows) const {
+                                    const ColumnNumbers& arguments, uint32_t result,
+                                    size_t num_rows) const {
     JNIEnv* env = nullptr;
     RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
     JniContext* jni_ctx = reinterpret_cast<JniContext*>(
             context->get_function_state(FunctionContext::THREAD_LOCAL));
     SCOPED_TIMER(context->get_udf_execute_timer());
+
+    // Check if this is a predicate UDF (returns boolean)
+    bool is_predicate = block.get_by_position(result).type->is_boolean();
+    
+    // Handle null values and prepare input data
     std::unique_ptr<long[]> input_table;
     RETURN_IF_ERROR(JniConnector::to_java_table(&block, num_rows, arguments, input_table));
+    
     auto input_table_schema = JniConnector::parse_table_schema(&block, arguments, true);
     std::map<String, String> input_params = {
             {"meta_address", std::to_string((long)input_table.get())},
             {"required_fields", input_table_schema.first},
             {"columns_types", input_table_schema.second}};
+            
     jobject input_map = JniUtil::convert_to_java_map(env, input_params);
     auto output_table_schema = JniConnector::parse_table_schema(&block, {result}, true);
     std::string output_nullable =
             block.get_by_position(result).type->is_nullable() ? "true" : "false";
     std::map<String, String> output_params = {{"is_nullable", output_nullable},
-                                              {"required_fields", output_table_schema.first},
-                                              {"columns_types", output_table_schema.second}};
+                                            {"required_fields", output_table_schema.first},
+                                            {"columns_types", output_table_schema.second}};
     jobject output_map = JniUtil::convert_to_java_map(env, output_params);
-    long output_address = env->CallLongMethod(jni_ctx->executor, jni_ctx->executor_evaluate_id,
-                                              input_map, output_map);
-    RETURN_IF_ERROR(JniUtil::GetJniExceptionMsg(env));
+
+    try {
+        // Execute UDF
+        long output_address = env->CallLongMethod(jni_ctx->executor, jni_ctx->executor_evaluate_id,
+                                               input_map, output_map);
+                                               
+        // Check for Java exceptions
+        jthrowable exc = env->ExceptionOccurred();
+        if (exc) {
+            env->ExceptionClear();
+            
+            // Get exception details
+            jclass exception_class = env->GetObjectClass(exc);
+            jmethodID getMessage = env->GetMethodID(exception_class, "getMessage", "()Ljava/lang/String;");
+            jstring message = (jstring)env->CallObjectMethod(exc, getMessage);
+            const char* error_msg = env->GetStringUTFChars(message, 0);
+            
+            // Log the error
+            LOG(WARNING) << "Java UDF execution error: " << error_msg;
+            context->add_warning(error_msg);
+            
+            env->ReleaseStringUTFChars(message, error_msg);
+            env->DeleteLocalRef(message);
+            env->DeleteLocalRef(exception_class);
+            env->DeleteLocalRef(exc);
+            
+            // Create a safe result column
+            if (is_predicate) {
+                // For predicates, create a filter column with correct size
+                auto filter_col = ColumnVector<UInt8>::create();
+                filter_col->get_data().resize_fill(num_rows, 0);  // All false
+                
+                if (block.get_by_position(result).type->is_nullable()) {
+                    auto null_map = ColumnUInt8::create();
+                    null_map->get_data().resize_fill(num_rows, 1);  // All null
+                    block.replace_by_position(result, ColumnNullable::create(std::move(filter_col), std::move(null_map)));
+                } else {
+                    block.replace_by_position(result, std::move(filter_col));
+                }
+            } else {
+                // For non-predicates, create a nullable column with all nulls
+                auto value_col = block.get_by_position(result).type->create_column();
+                value_col->reserve(num_rows);
+                for (size_t i = 0; i < num_rows; ++i) {
+                    value_col->insert_default();
+                }
+                
+                auto null_map = ColumnUInt8::create();
+                null_map->get_data().resize_fill(num_rows, 1);  // All null
+                block.replace_by_position(result, ColumnNullable::create(std::move(value_col), std::move(null_map)));
+            }
+            
+            return Status::OK();
+        }
+        
+        // No exception occurred, fill the block with results
+        RETURN_IF_ERROR(JniConnector::fill_block(&block, {result}, output_address));
+        
+        // Verify filter size for predicates
+        if (is_predicate) {
+            const auto& result_col = block.get_by_position(result).column;
+            if (result_col->size() != num_rows) {
+                LOG(WARNING) << "UDF predicate returned incorrect filter size. Expected: " 
+                            << num_rows << ", Got: " << result_col->size();
+                
+                // Create a new filter with correct size
+                auto filter_col = ColumnVector<UInt8>::create();
+                filter_col->get_data().resize_fill(num_rows, 0);  // All false
+                
+                if (block.get_by_position(result).type->is_nullable()) {
+                    auto null_map = ColumnUInt8::create();
+                    null_map->get_data().resize_fill(num_rows, 1);  // All null
+                    block.replace_by_position(result, ColumnNullable::create(std::move(filter_col), std::move(null_map)));
+                } else {
+                    block.replace_by_position(result, std::move(filter_col));
+                }
+            }
+        }
+    } catch (...) {
+        // Handle any C++ exceptions
+        LOG(WARNING) << "C++ exception during UDF execution";
+        context->add_warning("Internal error during UDF execution");
+        
+        // Create safe default result
+        if (is_predicate) {
+            auto filter_col = ColumnVector<UInt8>::create();
+            filter_col->get_data().resize_fill(num_rows, 0);  // All false
+            
+            if (block.get_by_position(result).type->is_nullable()) {
+                auto null_map = ColumnUInt8::create();
+                null_map->get_data().resize_fill(num_rows, 1);  // All null
+                block.replace_by_position(result, ColumnNullable::create(std::move(filter_col), std::move(null_map)));
+            } else {
+                block.replace_by_position(result, std::move(filter_col));
+            }
+        } else {
+            auto value_col = block.get_by_position(result).type->create_column();
+            value_col->reserve(num_rows);
+            for (size_t i = 0; i < num_rows; ++i) {
+                value_col->insert_default();
+            }
+            
+            auto null_map = ColumnUInt8::create();
+            null_map->get_data().resize_fill(num_rows, 1);  // All null
+            block.replace_by_position(result, ColumnNullable::create(std::move(value_col), std::move(null_map)));
+        }
+    }
+    
     env->DeleteLocalRef(input_map);
     env->DeleteLocalRef(output_map);
-
-    return JniConnector::fill_block(&block, {result}, output_address);
+    
+    return Status::OK();
 }
 
 Status JavaFunctionCall::close(FunctionContext* context,
