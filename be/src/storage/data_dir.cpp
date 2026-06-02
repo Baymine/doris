@@ -521,22 +521,20 @@ Status DataDir::load() {
 
     std::map<RowsetId, std::vector<RowsetMetaSharedPtr>> rowset_id_to_row_binlog_metas;
     int64_t row_binlog_cnt {0};
-    int64_t invalid_row_binlog_cnt {0};
     auto load_row_binlog_meta_func =
-            [&rowset_id_to_row_binlog_metas, &row_binlog_cnt, &invalid_row_binlog_cnt](
+            [&rowset_id_to_row_binlog_metas, &row_binlog_cnt](
                     const TabletUid& tablet_uid, const RowsetId& rowset_id,
                     const RowsetId& row_binlog_rowset_id, const std::string& val) -> bool {
         RowsetMetaSharedPtr rowset_meta(new RowsetMeta());
         bool parsed = rowset_meta->init(val);
         if (!parsed) {
-            LOG(WARNING) << "parse binlog<row> meta string failed, tablet_uid=" << tablet_uid
-                         << ", rowset_id=" << rowset_id
-                         << ", row_binlog_rowset_id=" << row_binlog_rowset_id;
-            ++invalid_row_binlog_cnt;
-            return true;
+            LOG(ERROR) << "parse binlog<row> meta string failed, tablet_uid=" << tablet_uid
+                       << ", rowset_id=" << rowset_id
+                       << ", row_binlog_rowset_id=" << row_binlog_rowset_id;
+            return false;
         }
-        DCHECK(rowset_meta->is_row_binlog());
-        DCHECK_EQ(rowset_meta->tablet_uid(), tablet_uid);
+        DORIS_CHECK(rowset_meta->is_row_binlog());
+        DORIS_CHECK_EQ(rowset_meta->tablet_uid(), tablet_uid);
         rowset_id_to_row_binlog_metas[rowset_id].emplace_back(std::move(rowset_meta));
         ++row_binlog_cnt;
         return true;
@@ -547,8 +545,7 @@ Status DataDir::load() {
     RETURN_IF_ERROR(RowsetMetaManager::traverse_row_binlog_metas(_meta, load_row_binlog_meta_func));
     rb_timer.stop();
     LOG(INFO) << "load binlog<row> meta finished, cost: " << rb_timer.elapsed_time_milliseconds()
-              << " ms, data dir: " << _path << ", count: " << row_binlog_cnt
-              << ", invalid: " << invalid_row_binlog_cnt;
+              << " ms, data dir: " << _path << ", count: " << row_binlog_cnt;
 
     // traverse rowset
     // 1. add committed rowset to txn map

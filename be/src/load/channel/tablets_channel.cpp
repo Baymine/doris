@@ -277,8 +277,8 @@ std::unique_ptr<BaseDeltaWriter> TabletsChannel::create_delta_writer(const Write
     }
 
     const auto* row_binlog_index_schema = request.table_schema_param->row_binlog_index_schema();
-    DCHECK(row_binlog_index_schema != nullptr);
-    DCHECK(row_binlog_index_schema->index_id == row_binlog_index_id);
+    DORIS_CHECK(row_binlog_index_schema != nullptr);
+    DORIS_CHECK(row_binlog_index_schema->index_id == row_binlog_index_id);
 
     // group_build_req is only for the group wrapper itself. It provides the group semantics and
     // metadata used by BaseDeltaWriter/GroupRowsetBuilder to expose tablet_id, txn_id,

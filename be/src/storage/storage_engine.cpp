@@ -1058,12 +1058,15 @@ void StorageEngine::_clean_unused_rowset_metas() {
         LOG(INFO) << "remove " << invalid_rowset_metas.size()
                   << " invalid rowset meta from dir: " << data_dir->path();
 
-        static_cast<void>(RowsetMetaManager::traverse_row_binlog_metas(data_dir->get_meta(),
+        RETURN_IF_ERROR(RowsetMetaManager::traverse_row_binlog_metas(data_dir->get_meta(),
                                                                        clean_row_binlog_rowsets));
         for (auto& rs_id_to_meta : invalid_row_binlog_metas) {
-            static_cast<void>(RowsetMetaManager::remove_row_binlog(
+            Status remove_st = RowsetMetaManager::remove_row_binlog(
                     data_dir->get_meta(), rs_id_to_meta.second->tablet_uid(), rs_id_to_meta.first,
-                    rs_id_to_meta.second->rowset_id()));
+                    rs_id_to_meta.second->rowset_id());
+            if (!remove_st.ok()) {
+                LOG(WARNING) << "Failed to remove row binlog meta: " << remove_st;
+            }
         }
         LOG(INFO) << "remove " << invalid_row_binlog_metas.size()
                   << " invalid binlog<row> meta from dir: " << data_dir->path();

@@ -254,9 +254,12 @@ public class StreamingInsertJob extends AbstractJob<StreamingJobSchedulerTask, M
                     dataSourceType, sourceProperties, String.valueOf(getJobId()), createTbls);
             this.offsetProvider = createOffsetProvider(getConvertedSourceProperties());
             this.offsetProvider.initOnCreate(this.syncTables);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("init streaming job interrupted for " + dataSourceType, e);
         } catch (Exception ex) {
             log.warn("init streaming job for {} failed", dataSourceType, ex);
-            throw new RuntimeException(ex.getMessage());
+            throw new RuntimeException(ex.getMessage(), ex);
         }
     }
 
@@ -417,9 +420,12 @@ public class StreamingInsertJob extends AbstractJob<StreamingJobSchedulerTask, M
                 Offset offset = validateOffset(jobProperties.getOffsetProperty());
                 this.offsetProvider.updateOffset(offset);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("init streaming insert job interrupted", e);
         } catch (Exception ex) {
             log.warn("init streaming insert job failed, sql: {}", getExecuteSql(), ex);
-            throw new RuntimeException(ex.getMessage());
+            throw new RuntimeException(ex.getMessage(), ex);
         }
     }
 
@@ -739,6 +745,9 @@ public class StreamingInsertJob extends AbstractJob<StreamingJobSchedulerTask, M
         }
         try {
             offsetProvider.advanceSplits();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JobException("advance splits interrupted, job id: " + getJobId());
         } catch (Exception ex) {
             log.warn("advance splits failed, job id: {}", getJobId(), ex);
             if (this.getFailureReason() == null

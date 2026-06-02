@@ -2715,10 +2715,10 @@ Status Tablet::save_delete_bitmap(const TabletTxnInfo* txn_info, int64_t txn_id,
             build_row_binlog ? txn_info->attach_rowsets[0]->rowset_id() : cur_build_rid;
     auto* binlog_delvec = txn_info->binlog_delvec.get();
     if (build_row_binlog) {
-        DCHECK(txn_info->attach_rowsets[0] != nullptr);
-        DCHECK(txn_info->attach_rowsets[0]->rowset_meta() != nullptr);
-        DCHECK(txn_info->attach_rowsets[0]->rowset_meta()->is_row_binlog());
-        DCHECK(binlog_delvec != nullptr);
+        DORIS_CHECK(txn_info->attach_rowsets[0] != nullptr);
+        DORIS_CHECK(txn_info->attach_rowsets[0]->rowset_meta() != nullptr);
+        DORIS_CHECK(txn_info->attach_rowsets[0]->rowset_meta()->is_row_binlog());
+        DORIS_CHECK(binlog_delvec != nullptr);
     }
 
     // update version without write lock, compaction and publish_txn

@@ -863,8 +863,11 @@ public class JdbcSourceOffsetProvider implements SourceOffsetProvider {
             return resp.getData();
         } catch (TimeoutException te) {
             throw new JobException("fetchSplits RPC timeout: jobId=" + getJobId() + " table=" + table);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JobException("fetchSplits interrupted: jobId=" + getJobId());
         } catch (Exception ex) {
-            throw new JobException("fetchSplits failed: " + ex.getMessage());
+            throw new JobException("fetchSplits failed: " + ex.getMessage(), ex);
         }
     }
 

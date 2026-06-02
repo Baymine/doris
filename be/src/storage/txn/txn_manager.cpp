@@ -775,8 +775,11 @@ Status TxnManager::delete_txn(OlapMeta* meta, TPartitionId partition_id,
                         RowsetStatePB_Name(rowset->rowset_meta_state()));
             } else {
                 for (const auto& attach_rowset : load_info->attach_rowsets) {
-                    static_cast<void>(RowsetMetaManager::remove_row_binlog(
-                            meta, tablet_uid, rowset->rowset_id(), attach_rowset->rowset_id()));
+                    Status remove_st = RowsetMetaManager::remove_row_binlog(
+                            meta, tablet_uid, rowset->rowset_id(), attach_rowset->rowset_id());
+                    if (!remove_st.ok()) {
+                        LOG(WARNING) << "Failed to remove row binlog meta: " << remove_st;
+                    }
                     _engine.add_unused_rowset(attach_rowset);
                 }
                 static_cast<void>(RowsetMetaManager::remove(meta, tablet_uid, rowset->rowset_id()));

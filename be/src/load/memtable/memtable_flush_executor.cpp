@@ -185,7 +185,7 @@ Status FlushToken::submit(std::shared_ptr<MemTable> mem_table) {
         // Keep data/binlog segment_id allocators in sync.
         auto segment_id = data_writer->allocate_segment_id();
         auto binlog_segment_id = binlog_writer->allocate_segment_id();
-        DCHECK_EQ(segment_id, binlog_segment_id);
+        DORIS_CHECK_EQ(segment_id, binlog_segment_id);
         shared_memtable->segment_id = segment_id;
 
         if (binlog_writer->context().write_binlog_opt().enable) {
@@ -337,7 +337,7 @@ Status FlushToken::_memtable2block(MemTable* memtable, SharedMemtable* shared_me
         return shared_memtable->block_status;
     }
     flush_block = shared_memtable->block;
-    DCHECK(flush_block != nullptr);
+    DORIS_CHECK(flush_block != nullptr);
     return Status::OK();
 }
 

@@ -454,7 +454,7 @@ void murmur_hash3_x64_process(const void* key, const size_t len, uint64_t& h1, u
 
 // The origin function `murmur_hash3_x64_128` is copied from: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
 // And Doris modified it into function `murmur_hash3_x64_process`
-// For this reason, this function is still retained even though it has no calls.
+// This function is retained as the seed-0 initialization path for `murmur_hash3_128`.
 void murmur_hash3_x64_128(const void* key, const size_t len, const uint32_t seed, void* out) {
     uint64_t h1 = seed;
     uint64_t h2 = seed;
