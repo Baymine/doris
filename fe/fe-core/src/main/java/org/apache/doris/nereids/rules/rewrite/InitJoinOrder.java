@@ -70,6 +70,16 @@ public class InitJoinOrder extends OneRewriteRuleFactory {
     }
 
     private Plan swapJoinChildrenIfNeed(LogicalJoin<? extends Plan, ? extends Plan> join, CascadesContext context) {
+        // Idempotency guard: each LogicalJoin is evaluated at most once by this rule.
+        // BottomUpVisitorRewriteJob rebuilds parent nodes via withChildren after any
+        // child swap, which would otherwise cause this rule to re-evaluate the same
+        // logical join repeatedly. Under concurrent load, stats may be unstable
+        // across passes, flipping the swap decision and producing a non-terminating
+        // rewrite loop. JoinReorderContext is carried through withChildren and
+        // through swapAndMark, so the marker survives across rebuilds.
+        if (join.getJoinReorderContext().hasInitJoinOrder()) {
+            return null;
+        }
         if (join.getJoinType().isLeftSemiOrAntiJoin() || join.getJoinType().isAsofJoin()) {
             // TODO: currently, the transform rules for right semi/anti/asof join is not complete,
             //  for example LogicalJoinSemiJoinTransposeProject (tpch 22) only works for left semi/anti join
@@ -109,7 +119,7 @@ public class InitJoinOrder extends OneRewriteRuleFactory {
             // Ensures very small tables are always placed on the build side (right side).
             if (leftRowCount <= SMALL_TABLE_ABSOLUTE_THRESHOLD && leftRowCount < rightRowCount) {
                 // Use swap() to properly handle ASOF JOIN MATCH_CONDITION commutation
-                return join.swap();
+                return swapAndMark(join);
             }
 
             // Strategy 2: Left table is within broadcast limit and right table is at least 2x larger.
@@ -117,13 +127,13 @@ public class InitJoinOrder extends OneRewriteRuleFactory {
             double broadcastLimit = context.getStatementContext().getConnectContext()
                     .getSessionVariable().getBroadcastRowCountLimit();
             if (leftRowCount <= broadcastLimit && leftRowCount * 2 < rightRowCount) {
-                return join.swap();
+                return swapAndMark(join);
             }
 
             // Strategy 3: Left table is much smaller than right table (relaxed threshold).
             // Handles cases where the ratio is significant even if not within broadcast limit.
             if (leftRowCount < rightRowCount * SWAP_THRESHOLD_RELAXED) {
-                return join.swap();
+                return swapAndMark(join);
             }
 
             // Strategy 4: Memory-based decision.
@@ -136,15 +146,27 @@ public class InitJoinOrder extends OneRewriteRuleFactory {
                     .getSessionVariable().getBroadcastHashtableMemLimitPercentage();
 
             if (rightMemory > memLimit && leftMemory <= memLimit) {
-                return join.swap();
+                return swapAndMark(join);
             }
 
             // Strategy 5: Fallback to traditional threshold for very small ratios.
             if (leftRowCount < rightRowCount * SWAP_THRESHOLD_TRADITIONAL) {
-                return join.swap();
+                return swapAndMark(join);
             }
         }
         return null;
+    }
+
+    private LogicalJoin<? extends Plan, ? extends Plan> swapAndMark(
+            LogicalJoin<? extends Plan, ? extends Plan> join) {
+        LogicalJoin<? extends Plan, ? extends Plan> swapped = join.swap();
+        // LogicalJoin.swap() builds a fresh LogicalJoin with a default JoinReorderContext.
+        // Copy the original context across so other reorder-state flags
+        // (hasCommute, hasLAsscom, isSaltJoinGenerated, ...) are preserved,
+        // then set our own marker.
+        swapped.getJoinReorderContext().copyFrom(join.getJoinReorderContext());
+        swapped.getJoinReorderContext().setHasInitJoinOrder(true);
+        return swapped;
     }
 
 }

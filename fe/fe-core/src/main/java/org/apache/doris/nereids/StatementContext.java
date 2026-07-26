@@ -65,7 +65,9 @@ import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.ShortCircuitQueryContext;
 import org.apache.doris.qe.cache.CacheAnalyzer;
+import org.apache.doris.statistics.ColumnStatistic;
 import org.apache.doris.statistics.Statistics;
+import org.apache.doris.statistics.StatisticsCacheKey;
 import org.apache.doris.system.Backend;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -252,6 +254,13 @@ public class StatementContext implements Closeable {
     // normally rather than getting
     // form this map
     private final Map<RelationId, Statistics> relationIdToStatisticsMap = new LinkedHashMap<>();
+
+    // Per-statement snapshot of ColumnStatistic, so that concurrent ANALYZE
+    // cannot flip a column's stats in the global StatisticsCache mid-plan and
+    // cause stats-based rewrite decisions (e.g. InitJoinOrder swap) to diverge
+    // across rewrite passes, producing a non-terminating rewrite loop.
+    private final Map<StatisticsCacheKey, ColumnStatistic> columnStatisticsPerStmtCache
+            = Maps.newConcurrentMap();
 
     // Indicates the query is short-circuited in both plan and execution phase,
     // typically
@@ -876,6 +885,10 @@ public class StatementContext implements Closeable {
     @VisibleForTesting
     public Map<RelationId, Statistics> getRelationIdToStatisticsMap() {
         return relationIdToStatisticsMap;
+    }
+
+    public Map<StatisticsCacheKey, ColumnStatistic> getColumnStatisticsPerStmtCache() {
+        return columnStatisticsPerStmtCache;
     }
 
     /**

@@ -33,6 +33,7 @@ import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.Pair;
 import org.apache.doris.nereids.CascadesContext;
+import org.apache.doris.nereids.StatementContext;
 import org.apache.doris.nereids.memo.Group;
 import org.apache.doris.nereids.memo.GroupExpression;
 import org.apache.doris.nereids.trees.expressions.Alias;
@@ -150,6 +151,7 @@ import org.apache.doris.statistics.StatisticRange;
 import org.apache.doris.statistics.Statistics;
 import org.apache.doris.statistics.StatisticsBuilder;
 import org.apache.doris.statistics.StatisticsCache.OlapTableStatistics;
+import org.apache.doris.statistics.StatisticsCacheKey;
 import org.apache.doris.statistics.TableStatsMeta;
 import org.apache.doris.statistics.util.StatisticsUtil;
 
@@ -1231,15 +1233,20 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
             catalogId = -1;
             dbId = -1;
         }
-        ColumnStatistic columnStatistics = Env.getCurrentEnv().getStatisticsCache().getColumnStatistics(
-                catalogId, dbId, table.getId(), idxId, colName, connectContext);
-        if (!columnStatistics.isUnKnown
-                && columnStatistics.ndv == 0
-                && (columnStatistics.minExpr != null || columnStatistics.maxExpr != null)
-                && columnStatistics.numNulls == columnStatistics.count) {
-            return ColumnStatistic.UNKNOWN;
+        // Per-statement cache: freeze the ColumnStatistic seen by this SQL so that
+        // concurrent ANALYZE cannot flip NDV/min/max mid-plan and cause rewrite-loop
+        // divergence (e.g. InitJoinOrder swap decisions depend on join selectivity
+        // which depends on NDV).
+        StatementContext stmtCtx = connectContext != null ? connectContext.getStatementContext() : null;
+        if (stmtCtx != null) {
+            final long catId = catalogId;
+            final long dId = dbId;
+            StatisticsCacheKey key = new StatisticsCacheKey(catalogId, dbId, table.getId(), idxId, colName);
+            return stmtCtx.getColumnStatisticsPerStmtCache().computeIfAbsent(
+                    key,
+                    k -> fetchAndSanitizeColumnStatistic(catId, dId, table.getId(), idxId, colName));
         }
-        return columnStatistics;
+        return fetchAndSanitizeColumnStatistic(catalogId, dbId, table.getId(), idxId, colName);
     }
 
     /**
@@ -1292,6 +1299,19 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
             // if any partition-col-stats is unknown, fall back to table level col stats
             return olapTableStatistics.getColumnStatistics(colName, connectContext);
         }
+    }
+
+    private ColumnStatistic fetchAndSanitizeColumnStatistic(
+            long catalogId, long dbId, long tableId, long idxId, String colName) {
+        ColumnStatistic columnStatistics = Env.getCurrentEnv().getStatisticsCache().getColumnStatistics(
+                catalogId, dbId, tableId, idxId, colName, connectContext);
+        if (!columnStatistics.isUnKnown
+                && columnStatistics.ndv == 0
+                && (columnStatistics.minExpr != null || columnStatistics.maxExpr != null)
+                && columnStatistics.numNulls == columnStatistics.count) {
+            return ColumnStatistic.UNKNOWN;
+        }
+        return columnStatistics;
     }
 
     /**

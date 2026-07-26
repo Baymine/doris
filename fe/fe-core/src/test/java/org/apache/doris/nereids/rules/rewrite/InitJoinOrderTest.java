@@ -18,7 +18,10 @@
 package org.apache.doris.nereids.rules.rewrite;
 
 import org.apache.doris.common.Pair;
+import org.apache.doris.nereids.rules.exploration.join.JoinReorderContext;
 import org.apache.doris.nereids.trees.plans.JoinType;
+import org.apache.doris.nereids.trees.plans.Plan;
+import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalOlapScan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
 import org.apache.doris.nereids.util.LogicalPlanBuilder;
@@ -27,6 +30,7 @@ import org.apache.doris.nereids.util.MemoTestUtils;
 import org.apache.doris.nereids.util.PlanChecker;
 import org.apache.doris.nereids.util.PlanConstructor;
 
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class InitJoinOrderTest implements MemoPatternMatchSupported {
@@ -64,5 +68,74 @@ class InitJoinOrderTest implements MemoPatternMatchSupported {
         PlanChecker.from(MemoTestUtils.createConnectContext(), join)
                 .applyTopDown(new InitJoinOrder())
                 .matches(logicalJoin());
+    }
+
+    // Idempotency guard: once a LogicalJoin has been visited by InitJoinOrder
+    // (hasInitJoinOrder == true on its JoinReorderContext), a second application
+    // of the rule must be a no-op.
+    @Test
+    void testSkipWhenAlreadyMarked() {
+        LogicalPlan plan = new LogicalPlanBuilder(scan1)
+                .join(scan2, JoinType.INNER_JOIN, Pair.of(0, 0))
+                .build();
+        ((LogicalJoin<?, ?>) plan).getJoinReorderContext().setHasInitJoinOrder(true);
+
+        Plan after = PlanChecker.from(MemoTestUtils.createConnectContext(), plan)
+                .applyBottomUp(new InitJoinOrder())
+                .getPlan();
+
+        Assertions.assertTrue(after instanceof LogicalJoin);
+        Assertions.assertTrue(
+                ((LogicalJoin<?, ?>) after).getJoinReorderContext().hasInitJoinOrder(),
+                "hasInitJoinOrder must survive the rewrite pass");
+    }
+
+    // After a successful swap, the rule must stamp hasInitJoinOrder=true on the
+    // resulting LogicalJoin so that subsequent re-applications terminate.
+    @Test
+    void testMarkerSetAfterSwap() {
+        LogicalPlan plan = new LogicalPlanBuilder(scan1)
+                .join(scan2, JoinType.INNER_JOIN, Pair.of(0, 0))
+                .build();
+
+        Plan after = PlanChecker.from(MemoTestUtils.createConnectContext(), plan)
+                .applyBottomUp(new InitJoinOrder())
+                .getPlan();
+
+        if (after instanceof LogicalJoin && !after.deepEquals(plan)) {
+            Assertions.assertTrue(
+                    ((LogicalJoin<?, ?>) after).getJoinReorderContext().hasInitJoinOrder(),
+                    "After InitJoinOrder swaps a join, the result must be marked "
+                            + "to prevent re-evaluation under BottomUpVisitorRewriteJob.");
+        }
+    }
+
+    @Test
+    void testJoinReorderContextCopyFromPreservesMarker() {
+        JoinReorderContext src = new JoinReorderContext();
+        src.setHasInitJoinOrder(true);
+        src.setHasCommute(true);
+
+        JoinReorderContext dst = new JoinReorderContext();
+        dst.copyFrom(src);
+
+        Assertions.assertTrue(dst.hasInitJoinOrder(),
+                "copyFrom must propagate hasInitJoinOrder");
+        Assertions.assertTrue(dst.hasCommute(),
+                "copyFrom must propagate hasCommute");
+    }
+
+    @Test
+    void testJoinReorderContextClearResetsMarker() {
+        JoinReorderContext ctx = new JoinReorderContext();
+        ctx.setHasInitJoinOrder(true);
+        ctx.setLeadingJoin(true);
+
+        ctx.clear();
+
+        Assertions.assertFalse(ctx.hasInitJoinOrder(),
+                "clear must reset hasInitJoinOrder");
+        Assertions.assertFalse(ctx.isLeadingJoin(),
+                "clear must reset isLeadingJoin");
     }
 }

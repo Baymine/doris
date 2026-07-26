@@ -42,6 +42,13 @@ public class JoinReorderContext {
     private boolean isLeadingJoin = false;
     private boolean isSaltJoinGenerated = false;
 
+    // Marks that InitJoinOrder has already evaluated swap on this join.
+    // Without it, BottomUpVisitorRewriteJob re-evaluates the rule when parent
+    // nodes are rebuilt via withChildren, and unstable stats (e.g. concurrent
+    // HMS/ANALYZE reads) can flip the swap decision across passes, producing
+    // a non-terminating rewrite loop.
+    private boolean hasInitJoinOrder = false;
+
     public JoinReorderContext() {
     }
 
@@ -57,6 +64,7 @@ public class JoinReorderContext {
         this.hasCommuteZigZag = joinReorderContext.hasCommuteZigZag;
         this.isLeadingJoin = joinReorderContext.isLeadingJoin;
         this.isSaltJoinGenerated = joinReorderContext.isSaltJoinGenerated;
+        this.hasInitJoinOrder = joinReorderContext.hasInitJoinOrder;
     }
 
     /**
@@ -71,6 +79,7 @@ public class JoinReorderContext {
         hasLeftAssociate = false;
         isLeadingJoin = false;
         isSaltJoinGenerated = false;
+        hasInitJoinOrder = false;
     }
 
     public boolean hasCommute() {
@@ -135,5 +144,13 @@ public class JoinReorderContext {
 
     public void setSaltJoinGenerated(boolean saltJoinGenerated) {
         isSaltJoinGenerated = saltJoinGenerated;
+    }
+
+    public boolean hasInitJoinOrder() {
+        return hasInitJoinOrder;
+    }
+
+    public void setHasInitJoinOrder(boolean hasInitJoinOrder) {
+        this.hasInitJoinOrder = hasInitJoinOrder;
     }
 }
