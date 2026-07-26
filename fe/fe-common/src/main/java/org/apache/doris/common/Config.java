@@ -3735,4 +3735,10 @@ public class Config extends ConfigBase {
                     + "（持有主副本的桶），并在单个 tablet 写入量超过阈值（默认 200 MB）后在本地桶之间轮转。"
                     + "可降低导入内存压力并提升随机分桶表的吞吐量，覆盖所有导入类型。"})
     public static boolean enable_adaptive_random_bucket_load = true;
+
+    @ConfField(mutable = true, description = {"sql_converter连接超时", "sql_converter connect timeout ms"})
+    public static int sql_converter_connect_timeout_ms = 3000;
+
+    @ConfField(mutable = true, description = {"sql_converter请求超时", "sql_converter read timeout ms"})
+    public static int sql_converter_read_timeout_ms = 3000;
 }

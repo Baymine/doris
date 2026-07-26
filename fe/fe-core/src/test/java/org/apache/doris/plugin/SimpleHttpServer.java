@@ -38,6 +38,7 @@ public class SimpleHttpServer {
     private int port;
     private HttpServer server;
     private String response;
+    private long responseDelayMs = 0;
 
     public SimpleHttpServer(int port) {
         this.port = port;
@@ -49,6 +50,14 @@ public class SimpleHttpServer {
 
     public String getResponse() {
         return response;
+    }
+
+    public void setResponseDelayMs(long responseDelayMs) {
+        this.responseDelayMs = responseDelayMs;
+    }
+
+    public long getResponseDelayMs() {
+        return responseDelayMs;
     }
 
     public void start(String path) throws IOException {
@@ -78,6 +87,14 @@ public class SimpleHttpServer {
                 InputStream requestBody = exchange.getRequestBody();
                 String body = new String(readAllBytes(requestBody), StandardCharsets.UTF_8);
                 System.out.println(body);
+                long delayMs = server.getResponseDelayMs();
+                if (delayMs > 0) {
+                    try {
+                        Thread.sleep(delayMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
                 String responseText = server.getResponse();
                 exchange.sendResponseHeaders(200, responseText.getBytes().length);
                 OutputStream responseBody = exchange.getResponseBody();

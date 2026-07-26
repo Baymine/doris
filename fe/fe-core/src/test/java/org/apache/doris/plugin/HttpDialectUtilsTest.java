@@ -17,6 +17,7 @@
 
 package org.apache.doris.plugin;
 
+import org.apache.doris.common.Config;
 import org.apache.doris.plugin.dialect.HttpDialectUtils;
 
 import org.junit.After;
@@ -69,6 +70,28 @@ public class HttpDialectUtilsTest {
                 "{\"version\": \"v1\", \"data\": \"" + expectedSql + "\", \"code\": 400, \"message\": \"\"}");
         res = HttpDialectUtils.convertSql(targetURL, originSql, "presto", features, "{}");
         Assert.assertEquals(originSql, res);
+    }
+
+    @Test
+    public void testSqlConvertReadTimeout() {
+        String originSql = "select * from t1 where \"k1\" = 1";
+        String expectedSql = "select * from t1 where `k1` = 1";
+        String[] features = new String[] {"ctas"};
+        String targetURL = "http://127.0.0.1:" + port + "/api/v1/convert";
+        int originReadTimeout = Config.sql_converter_read_timeout_ms;
+        try {
+            // server would return a valid conversion, but responds slower than the read timeout
+            server.setResponse(
+                    "{\"version\": \"v1\", \"data\": \"" + expectedSql + "\", \"code\": 0, \"message\": \"\"}");
+            server.setResponseDelayMs(2000);
+            Config.sql_converter_read_timeout_ms = 200;
+            // read timeout triggers, convertSql should gracefully fall back to the origin statement
+            String res = HttpDialectUtils.convertSql(targetURL, originSql, "presto", features, "{}");
+            Assert.assertEquals(originSql, res);
+        } finally {
+            Config.sql_converter_read_timeout_ms = originReadTimeout;
+            server.setResponseDelayMs(0);
+        }
     }
 
     private static int findValidPort() {
