@@ -24,6 +24,7 @@
 #include <list>
 #include <memory>
 #include <orc/OrcFile.hh>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -130,6 +131,9 @@ struct LazyReadContext {
 
 class OrcReader : public TableFormatReader, public RowPositionProvider {
     ENABLE_FACTORY_CREATOR(OrcReader);
+
+    // Allow the unit test for the static _collect_slot_ids helper to reach the private method.
+    friend class OrcCollectSlotIdsTest;
 
 public:
     Status get_file_type(const orc::Type** root) {
@@ -679,6 +683,9 @@ private:
 
     bool _can_filter_by_dict(int slot_id);
 
+    // Collect slot ids referenced anywhere in an expr tree (recursing children).
+    static void _collect_slot_ids(const VExprSPtr& expr, std::set<int>& slot_ids);
+
     Status _rewrite_dict_conjuncts(std::vector<int32_t>& dict_codes, int slot_id, bool is_nullable);
 
     Status _convert_dict_cols_to_string_cols(Block* block,
@@ -825,7 +832,11 @@ private:
     VExprContextSPtrs _dict_filter_conjuncts;
     VExprContextSPtrs _non_dict_filter_conjuncts;
     VExprContextSPtrs _filter_conjuncts;
-    bool _disable_dict_filter = false;
+    // Slot ids referenced by multi-slot (not_single_slot) filter conjuncts, e.g.
+    // concat(a, b) IN (...). A dict-filter column is rewritten into an int dict-id
+    // column, which would corrupt such a conjunct's input, so these slots must not
+    // be dict-filtered even when they also appear in a single-slot predicate.
+    std::set<int> _multi_slot_referenced_slot_ids;
     // std::pair<col_name, slot_id>
     std::vector<std::pair<std::string, int>> _dict_filter_cols;
     std::unique_ptr<ObjectPool> _obj_pool;

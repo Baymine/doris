@@ -587,7 +587,18 @@ Status OrcReader::_do_init_reader(ReaderInitContext* base_ctx) {
     if (!_not_single_slot_filter_conjuncts.empty()) {
         _filter_conjuncts.insert(_filter_conjuncts.end(), _not_single_slot_filter_conjuncts.begin(),
                                  _not_single_slot_filter_conjuncts.end());
-        _disable_dict_filter = true;
+        // A dict-filter column gets rewritten into an int dict-id column. If such a
+        // column is also referenced by a multi-slot conjunct (e.g. concat(a,b) IN ...),
+        // that conjunct would then read int instead of string and produce wrong
+        // results. Instead of disabling dict filter for the whole reader, only exclude
+        // the specific slots referenced by multi-slot conjuncts (see _can_filter_by_dict).
+        for (const auto& conjunct_ctx : _not_single_slot_filter_conjuncts) {
+            // For a runtime-filter conjunct the real expr is under get_impl(); mirror
+            // how FileScanner classifies conjuncts so we don't miss referenced slots.
+            VExprSPtr impl = conjunct_ctx->root()->get_impl();
+            _collect_slot_ids(impl != nullptr ? impl : conjunct_ctx->root(),
+                              _multi_slot_referenced_slot_ids);
+        }
     }
     if (_slot_id_to_filter_conjuncts && !_slot_id_to_filter_conjuncts->empty()) {
         for (auto& kv : _lazy_read_ctx.predicate_partition_columns) {
@@ -2994,8 +3005,7 @@ Status OrcReader::fill_dict_filter_column_names(
     int i = 0;
     for (const auto& predicate_col_name : predicate_col_names) {
         int slot_id = predicate_col_slot_ids[i];
-        if (!_disable_dict_filter &&
-            has_column_optimization(predicate_col_name, ColumnOptimizationTypes::DICT_FILTER) &&
+        if (has_column_optimization(predicate_col_name, ColumnOptimizationTypes::DICT_FILTER) &&
             _can_filter_by_dict(slot_id)) {
             _dict_filter_cols.emplace_back(predicate_col_name, slot_id);
             column_names.emplace_back(
@@ -3013,7 +3023,27 @@ Status OrcReader::fill_dict_filter_column_names(
     return Status::OK();
 }
 
+void OrcReader::_collect_slot_ids(const VExprSPtr& expr, std::set<int>& slot_ids) {
+    if (expr == nullptr) {
+        return;
+    }
+    if (expr->is_slot_ref()) {
+        slot_ids.insert(static_cast<const VSlotRef*>(expr.get())->slot_id());
+        return;
+    }
+    for (const auto& child : expr->children()) {
+        _collect_slot_ids(child, slot_ids);
+    }
+}
+
 bool OrcReader::_can_filter_by_dict(int slot_id) {
+    // A column referenced by a multi-slot conjunct cannot be dict-filtered: dict
+    // filtering rewrites it into an int dict-id column, which would corrupt that
+    // conjunct's string input.
+    if (_multi_slot_referenced_slot_ids.contains(slot_id)) {
+        return false;
+    }
+
     SlotDescriptor* slot = nullptr;
     const std::vector<SlotDescriptor*>& slots = _tuple_descriptor->slots();
     for (auto* each : slots) {
