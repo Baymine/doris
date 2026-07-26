@@ -128,6 +128,7 @@ public final class MetricRepo {
 
     public static AutoMappedMetric<LongCounterMetric> USER_COUNTER_QUERY_ALL;
     public static AutoMappedMetric<LongCounterMetric> USER_COUNTER_QUERY_ERR;
+    public static AutoMappedMetric<LongCounterMetric> USER_COUNTER_CONNECTION_ERR;
     public static Histogram HISTO_QUERY_LATENCY;
     public static AutoMappedMetric<HistogramMetric> USER_HISTO_QUERY_LATENCY;
     public static AutoMappedMetric<GaugeMetricImpl<Long>> USER_GAUGE_QUERY_INSTANCE_NUM;
@@ -558,6 +559,14 @@ public final class MetricRepo {
             userCountQueryErr.addLabel(new MetricLabel("user", name));
             DORIS_METRIC_REGISTER.addMetrics(userCountQueryErr);
             return userCountQueryErr;
+        });
+        USER_COUNTER_CONNECTION_ERR = new AutoMappedMetric<>(userName -> {
+            LongCounterMetric userConnectionErr = new LongCounterMetric("user_connection_err",
+                    MetricUnit.CONNECTIONS,
+                    "total connection error num for user");
+            userConnectionErr.addLabel(new MetricLabel("user", userName));
+            DORIS_METRIC_REGISTER.addMetrics(userConnectionErr);
+            return userConnectionErr;
         });
         HISTO_QUERY_LATENCY = METRIC_REGISTER.histogram(
                 MetricRegistry.name("query", "latency", "ms"));
