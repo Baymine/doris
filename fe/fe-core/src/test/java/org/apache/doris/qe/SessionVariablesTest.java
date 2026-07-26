@@ -25,6 +25,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ExceptionChecker;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.nereids.parser.Dialect;
 import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.rules.rewrite.eageraggregation.EagerAggHints.Action;
 import org.apache.doris.thrift.TQueryOptions;
@@ -400,5 +401,13 @@ public class SessionVariablesTest extends TestWithFeService {
         TQueryOptions queryOptions = variable.toThrift();
         Assertions.assertTrue(queryOptions.isSetFileCacheQueryLimitBytes());
         Assertions.assertEquals(262144L, queryOptions.getFileCacheQueryLimitBytes());
+    }
+
+    @Test
+    public void testDecimalSessionVariables() {
+        sessionVariable.setSqlDialect(Dialect.PRESTO.getDialectName());
+        Assertions.assertTrue(sessionVariable.isEnableDecimal256());
+        sessionVariable.setSqlDialect(Dialect.DORIS.getDialectName());
+        Assertions.assertFalse(sessionVariable.isEnableDecimal256());
     }
 }
