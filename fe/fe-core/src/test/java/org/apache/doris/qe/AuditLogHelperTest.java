@@ -57,17 +57,43 @@ public class AuditLogHelperTest {
 
     @Test
     public void testUpdateMetricsQueryErr() {
+        // OTHER_ERR (non-analysis) query: query_err increments, analysis_err stays flat
         ConnectContext ctx = createMockContext(true, false);
         ctx.getState().setError("test error");
+        ctx.getState().setErrType(QueryState.ErrType.OTHER_ERR);
 
         long beforeAll = MetricRepo.COUNTER_QUERY_ALL.getValue();
         long beforeErr = MetricRepo.COUNTER_QUERY_ERR.getValue();
+        long beforeAnalysisErr = MetricRepo.COUNTER_ANALYSIS_ERR.getValue();
         AuditLogHelper.updateMetrics(ctx);
         long afterAll = MetricRepo.COUNTER_QUERY_ALL.getValue();
         long afterErr = MetricRepo.COUNTER_QUERY_ERR.getValue();
+        long afterAnalysisErr = MetricRepo.COUNTER_ANALYSIS_ERR.getValue();
 
         Assert.assertEquals(1, afterAll - beforeAll);
         Assert.assertEquals(1, afterErr - beforeErr);
+        Assert.assertEquals(0, afterAnalysisErr - beforeAnalysisErr);
+    }
+
+    @Test
+    public void testUpdateMetricsQueryAnalysisErr() {
+        // ANALYSIS_ERR query: previously excluded from query_err; now query_err must count
+        // it too, and analysis_err must record the breakdown.
+        ConnectContext ctx = createMockContext(true, false);
+        ctx.getState().setError("analysis error");
+        ctx.getState().setErrType(QueryState.ErrType.ANALYSIS_ERR);
+
+        long beforeAll = MetricRepo.COUNTER_QUERY_ALL.getValue();
+        long beforeErr = MetricRepo.COUNTER_QUERY_ERR.getValue();
+        long beforeAnalysisErr = MetricRepo.COUNTER_ANALYSIS_ERR.getValue();
+        AuditLogHelper.updateMetrics(ctx);
+        long afterAll = MetricRepo.COUNTER_QUERY_ALL.getValue();
+        long afterErr = MetricRepo.COUNTER_QUERY_ERR.getValue();
+        long afterAnalysisErr = MetricRepo.COUNTER_ANALYSIS_ERR.getValue();
+
+        Assert.assertEquals(1, afterAll - beforeAll);
+        Assert.assertEquals(1, afterErr - beforeErr);
+        Assert.assertEquals(1, afterAnalysisErr - beforeAnalysisErr);
     }
 
     @Test
