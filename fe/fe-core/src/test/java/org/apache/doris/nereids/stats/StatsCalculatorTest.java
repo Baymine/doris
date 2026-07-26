@@ -648,6 +648,65 @@ public class StatsCalculatorTest {
         Assertions.assertTrue(cascadesContext.getConnectContext().getSessionVariable().isDisableJoinReorder());
     }
 
+    /**
+     * Regression for the InitJoinOrder hot loop: under BottomUp rewrite the same
+     * external table appears in many CatalogRelation lists, and before the fix
+     * each occurrence re-resolved table metadata through the remote-table /
+     * catalog cache, which on a deep tree drove plan time to the
+     * nereids_timeout_second ceiling.
+     *
+     * The fix caches the row-count-availability answer per (statement, tableId)
+     * for non-OlapScan relations on StatementContext#joinReorderStatsCheckCache.
+     * This test asserts the cache contract, not the rule itself: OlapScan paths
+     * do NOT populate the cache (per-scan ndv check still runs), so the cache
+     * must stay empty after a disableJoinReorderIfStatsInvalid pass over
+     * OlapScans only.
+     */
+    @Test
+    public void testJoinReorderStatsCheckCacheOnlyForExternalTables() {
+        LogicalJoin<?, ?> join = (LogicalJoin<?, ?>) new LogicalPlanBuilder(scan1)
+                .join(scan2, JoinType.INNER_JOIN, Pair.of(0, 0))
+                .build();
+        CascadesContext context = MemoTestUtils.createCascadesContext(join);
+        context.getConnectContext().getSessionVariable()
+                .setVarOnce(SessionVariable.DISABLE_JOIN_REORDER, "false");
+
+        Map<Long, Boolean> cache = context.getStatementContext().getJoinReorderStatsCheckCache();
+        Assertions.assertTrue(cache.isEmpty(), "cache should start empty");
+
+        // OlapScan path: cache must stay empty -- ndv check is per-scan and may
+        // legitimately differ between two scans of the same physical table.
+        StatsCalculator.disableJoinReorderIfStatsInvalid(ImmutableList.of(scan1, scan2), context);
+        Assertions.assertTrue(cache.isEmpty(),
+                "OlapScan must not populate the cache (its ndv check is per-scan)");
+    }
+
+    /**
+     * Same statement context, repeated invocations: cache instance must be the
+     * same Map (so external-table answers persist across calls). This is the
+     * load-bearing invariant -- without it InitJoinOrder still re-checks every
+     * scan on every visited LogicalJoin.
+     */
+    @Test
+    public void testJoinReorderStatsCheckCacheIsStatementScoped() {
+        LogicalJoin<?, ?> join = (LogicalJoin<?, ?>) new LogicalPlanBuilder(scan1)
+                .join(scan2, JoinType.INNER_JOIN, Pair.of(0, 0))
+                .build();
+        CascadesContext context = MemoTestUtils.createCascadesContext(join);
+
+        Map<Long, Boolean> cache1 = context.getStatementContext().getJoinReorderStatsCheckCache();
+        Map<Long, Boolean> cache2 = context.getStatementContext().getJoinReorderStatsCheckCache();
+        Assertions.assertSame(cache1, cache2,
+                "the same StatementContext must hand out the same cache instance");
+
+        // simulate the path having previously resolved external table id=42 as
+        // having usable stats; the entry must still be visible on the next
+        // invocation that shares the same statement context.
+        cache1.put(42L, true);
+        Assertions.assertEquals(Boolean.TRUE,
+                context.getStatementContext().getJoinReorderStatsCheckCache().get(42L));
+    }
+
     @Test
     public void testOlapScanWithPlanWithUnknownColumnStats() {
         boolean prevFlag = false;

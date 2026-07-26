@@ -267,8 +267,33 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
             return Optional.empty();
         }
         boolean enableDebugLog = LOG.isDebugEnabled();
+        // Per-statement cache for the row-count availability check on external
+        // (non-OlapScan) tables. The external-table path resolves through the
+        // remote-table / catalog cache and was being hit hundreds of times for a
+        // single SQL when InitJoinOrder runs across a deep BottomUp rewrite
+        // (every LogicalJoin re-checks every CatalogRelation in its subtree, so
+        // the same physical table is re-resolved many times for SQL with deep
+        // joins or CTE expansion). Whether an external table has a usable row
+        // count is invariant for the lifetime of a single statement, so caching
+        // by tableId is safe and changes no decision logic.
+        // OlapScan path is intentionally NOT cached: its ndv check inspects the
+        // scan's output slots (different scans of the same table may project
+        // different columns), and the underlying lookups are in-memory and cheap.
+        Map<Long, Boolean> rowCountValidCache = context.getStatementContext().getJoinReorderStatsCheckCache();
         for (CatalogRelation scan : scans) {
-            double rowCount = calculator.getTableRowCount(scan);
+            double rowCount;
+            if (scan instanceof OlapScan) {
+                rowCount = calculator.getTableRowCount(scan);
+            } else {
+                long tableId = scan.getTable().getId();
+                Boolean cached = rowCountValidCache.get(tableId);
+                if (cached != null) {
+                    rowCount = cached ? 0 : -1;
+                } else {
+                    rowCount = calculator.getTableRowCount(scan);
+                    rowCountValidCache.put(tableId, rowCount != -1);
+                }
+            }
             // row count not available
             if (rowCount == -1) {
                 if (enableDebugLog) {

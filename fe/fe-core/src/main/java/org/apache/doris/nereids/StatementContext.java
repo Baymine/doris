@@ -206,6 +206,19 @@ public class StatementContext implements Closeable {
     // all tables in query
     private boolean needLockTables = true;
 
+    // Per-statement cache for StatsCalculator#disableJoinReorderIfStatsInvalid
+    // when checking external (non-OlapScan) tables. Keyed by TableIf#getId();
+    // value = true means the table's row count is available (>= 0), false means
+    // it's -1 / unavailable. Without this cache the check is re-run for every
+    // CatalogRelation under every LogicalJoin during BottomUp rewrite, and on
+    // the external-table path each call re-resolves the same physical table
+    // (e.g. through the remote-table / catalog cache) hundreds of times for a
+    // single SQL with deep joins or CTE expansion. The "is row count available"
+    // answer is invariant for the lifetime of a single statement, so caching by
+    // tableId is safe. OlapScan is NOT cached here: its ndv check inspects
+    // per-scan output slots, and the underlying lookups are in-memory and cheap.
+    private final Map<Long, Boolean> joinReorderStatsCheckCache = Maps.newConcurrentMap();
+
     // tables in this query directly
     private final Map<List<String>, TableIf> tables = Maps.newHashMap();
     // onelevel tables in this query directly,
@@ -417,6 +430,10 @@ public class StatementContext implements Closeable {
 
     public Map<List<String>, TableIf> getTables() {
         return tables;
+    }
+
+    public Map<Long, Boolean> getJoinReorderStatsCheckCache() {
+        return joinReorderStatsCheckCache;
     }
 
     public Map<List<String>, TableIf> getOneLevelTables() {
