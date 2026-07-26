@@ -667,6 +667,7 @@ DOUBLEATSIGN: '@@';
 STRING_LITERAL
     :  '\'' ( {!isNoBackslashEscapes}? '\\'. | '\'\'' | {!isNoBackslashEscapes}? ~('\'' | '\\') | {isNoBackslashEscapes}? ~('\''))* '\''
     | '"' ( {!isNoBackslashEscapes}? '\\'. | '""' | {!isNoBackslashEscapes}? ~('"'| '\\') | {isNoBackslashEscapes}? ~('"'))* '"'
+    | 'U&\'' ( ~'\'' | '\'\'' )* '\''
     ;
 
 VARBINARY_LITERAL

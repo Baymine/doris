@@ -3726,19 +3726,116 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
         }
     }
 
+    private enum UnicodeDecodeState {
+        EMPTY,
+        ESCAPED,
+        UNICODE_SEQUENCE
+    }
+
+    private static boolean isHexDigit(char c) {
+        return ((c >= '0') && (c <= '9')) || ((c >= 'A') && (c <= 'F')) || ((c >= 'a') && (c <= 'f'));
+    }
+
+    /**
+     * Decode a SQL-standard/Presto {@code U&'...'} unicode string literal. The leading {@code U&'}
+     * and trailing {@code '} are stripped, doubled quotes {@code ''} are collapsed to a single
+     * quote, and Unicode escapes are decoded: {@code \XXXX} (4-hex BMP code point),
+     * {@code \+XXXXXX} (6-hex code point, may be supplementary) and {@code \\} (a literal
+     * backslash). Malformed input (invalid hex digit, incomplete sequence, invalid code point or a
+     * lone surrogate) raises a {@link ParseException}.
+     */
+    private static String decodeUnicodeLiteral(String rawUnicodeString, StringLiteralContext ctx) {
+        char escape = '\\';
+        String rawContent = rawUnicodeString.substring(3, rawUnicodeString.length() - 1).replace("''", "'");
+        StringBuilder unicodeStringBuilder = new StringBuilder();
+        StringBuilder escapedCharacterBuilder = new StringBuilder();
+        int charactersNeeded = 0;
+        UnicodeDecodeState state = UnicodeDecodeState.EMPTY;
+        for (int i = 0; i < rawContent.length(); i++) {
+            char ch = rawContent.charAt(i);
+            switch (state) {
+                case EMPTY:
+                    if (ch == escape) {
+                        state = UnicodeDecodeState.ESCAPED;
+                    } else {
+                        unicodeStringBuilder.append(ch);
+                    }
+                    break;
+                case ESCAPED:
+                    if (ch == escape) {
+                        unicodeStringBuilder.append(escape);
+                        state = UnicodeDecodeState.EMPTY;
+                    } else if (ch == '+') {
+                        state = UnicodeDecodeState.UNICODE_SEQUENCE;
+                        charactersNeeded = 6;
+                    } else if (isHexDigit(ch)) {
+                        state = UnicodeDecodeState.UNICODE_SEQUENCE;
+                        charactersNeeded = 4;
+                        escapedCharacterBuilder.append(ch);
+                    } else {
+                        throw new ParseException("Invalid hexadecimal digit: " + ch, ctx);
+                    }
+                    break;
+                case UNICODE_SEQUENCE:
+                    if (!isHexDigit(ch)) {
+                        throw new ParseException("Incomplete escape sequence: " + escapedCharacterBuilder, ctx);
+                    }
+                    escapedCharacterBuilder.append(ch);
+                    if (charactersNeeded == escapedCharacterBuilder.length()) {
+                        String currentEscapedCode = escapedCharacterBuilder.toString();
+                        escapedCharacterBuilder.setLength(0);
+                        int codePoint = Integer.parseInt(currentEscapedCode, 16);
+                        if (!Character.isValidCodePoint(codePoint)) {
+                            throw new ParseException("Invalid escaped character: " + currentEscapedCode, ctx);
+                        }
+                        if (Character.isSupplementaryCodePoint(codePoint)) {
+                            unicodeStringBuilder.appendCodePoint(codePoint);
+                        } else {
+                            char currentCodePoint = (char) codePoint;
+                            if (Character.isSurrogate(currentCodePoint)) {
+                                throw new ParseException(String.format("Invalid escaped character: %s. Escaped "
+                                        + "character is a surrogate. Use '\\+123456' instead.", currentEscapedCode),
+                                        ctx);
+                            }
+                            unicodeStringBuilder.append(currentCodePoint);
+                        }
+                        state = UnicodeDecodeState.EMPTY;
+                        charactersNeeded = -1;
+                    } else {
+                        Preconditions.checkState(charactersNeeded > escapedCharacterBuilder.length(),
+                                "Unexpected escape sequence length: " + escapedCharacterBuilder.length());
+                    }
+                    break;
+                default:
+                    throw new UnsupportedOperationException();
+            }
+        }
+        if (state != UnicodeDecodeState.EMPTY) {
+            throw new ParseException("Incomplete escape sequence: " + escapedCharacterBuilder, ctx);
+        }
+        return unicodeStringBuilder.toString();
+    }
+
     @Override
     public Literal visitStringLiteral(StringLiteralContext ctx) {
         String txt = ctx.STRING_LITERAL().getText();
-        String s = txt.substring(1, txt.length() - 1);
-        if (txt.charAt(0) == '\'') {
-            // for single quote string, '' should be converted to '
-            s = s.replace("''", "'");
-        } else if (txt.charAt(0) == '"') {
-            // for double quote string, "" should be converted to "
-            s = s.replace("\"\"", "\"");
-        }
-        if (!SqlModeHelper.hasNoBackSlashEscapes()) {
-            s = LogicalPlanBuilderAssistant.escapeBackSlash(s);
+        // Only uppercase U& tokenizes as a unicode literal (see DorisLexer.g4 STRING_LITERAL).
+        boolean isUnicodeString = txt.startsWith("U&");
+        String s;
+        if (isUnicodeString) {
+            // U&'...' escaping is self-contained: decodeUnicodeLiteral already collapses '' and
+            // decodes backslash escapes, so MySQL-style '' collapsing and escapeBackSlash must not run.
+            s = decodeUnicodeLiteral(txt, ctx);
+        } else {
+            s = txt.substring(1, txt.length() - 1);
+            if (txt.charAt(0) == '\'') {
+                s = s.replace("''", "'");
+            } else if (txt.charAt(0) == '"') {
+                s = s.replace("\"\"", "\"");
+            }
+            if (!SqlModeHelper.hasNoBackSlashEscapes()) {
+                s = LogicalPlanBuilderAssistant.escapeBackSlash(s);
+            }
         }
         int strLength = Utils.containChinese(s) ? s.length() * StringLikeLiteral.CHINESE_CHAR_BYTE_LENGTH : s.length();
         if (strLength > ScalarType.MAX_VARCHAR_LENGTH) {
