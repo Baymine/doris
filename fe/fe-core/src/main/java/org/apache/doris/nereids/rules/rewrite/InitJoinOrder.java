@@ -41,7 +41,15 @@ import java.util.Optional;
  */
 public class InitJoinOrder extends OneRewriteRuleFactory {
     private static final Logger LOG = LoggerFactory.getLogger(InitJoinOrder.class);
-    private static final double SWAP_THRESHOLD = 0.1;
+
+    // Traditional threshold: left table should be much smaller than right table
+    private static final double SWAP_THRESHOLD_TRADITIONAL = 0.1;
+
+    // Relaxed threshold for small tables
+    private static final double SWAP_THRESHOLD_RELAXED = 0.3;
+
+    // Absolute small table threshold (10 million rows)
+    private static final long SMALL_TABLE_ABSOLUTE_THRESHOLD = 10000000;
     private final StatsDerive derive = new StatsDerive(false);
 
     @Override
@@ -86,9 +94,53 @@ public class InitJoinOrder extends OneRewriteRuleFactory {
             }
 
             // requires "left.getStats().getRowCount() > 0" to avoid dead loop when negative row count is estimated.
-            if (left.getStats().getRowCount() < right.getStats().getRowCount() * SWAP_THRESHOLD
-                    && left.getStats().getRowCount() > 0) {
+            double leftRowCount = left.getStats().getRowCount();
+            double rightRowCount = right.getStats().getRowCount();
+
+            // Both row counts should be positive for meaningful comparison.
+            // The outer disableJoinReorderIfStatsInvalid check already ensures
+            // rowCount != UNKNOWN_ROW_COUNT (-1); estimation values (even if not
+            // perfectly accurate) are considered reliable for join order decisions.
+            if (leftRowCount <= 0 || rightRowCount <= 0) {
+                return null;
+            }
+
+            // Strategy 1: Left table is absolutely small (<= 10M rows) and right table is larger.
+            // Ensures very small tables are always placed on the build side (right side).
+            if (leftRowCount <= SMALL_TABLE_ABSOLUTE_THRESHOLD && leftRowCount < rightRowCount) {
                 // Use swap() to properly handle ASOF JOIN MATCH_CONDITION commutation
+                return join.swap();
+            }
+
+            // Strategy 2: Left table is within broadcast limit and right table is at least 2x larger.
+            // Aligns with broadcast join threshold for better memory efficiency.
+            double broadcastLimit = context.getStatementContext().getConnectContext()
+                    .getSessionVariable().getBroadcastRowCountLimit();
+            if (leftRowCount <= broadcastLimit && leftRowCount * 2 < rightRowCount) {
+                return join.swap();
+            }
+
+            // Strategy 3: Left table is much smaller than right table (relaxed threshold).
+            // Handles cases where the ratio is significant even if not within broadcast limit.
+            if (leftRowCount < rightRowCount * SWAP_THRESHOLD_RELAXED) {
+                return join.swap();
+            }
+
+            // Strategy 4: Memory-based decision.
+            // If right table as build side would exceed memory limit but left would not, swap.
+            double leftMemory = left.getStats().computeSize(left.getOutput());
+            double rightMemory = right.getStats().computeSize(right.getOutput());
+            double memLimit = context.getStatementContext().getConnectContext()
+                    .getSessionVariable().getMaxExecMemByte()
+                    * context.getStatementContext().getConnectContext()
+                    .getSessionVariable().getBroadcastHashtableMemLimitPercentage();
+
+            if (rightMemory > memLimit && leftMemory <= memLimit) {
+                return join.swap();
+            }
+
+            // Strategy 5: Fallback to traditional threshold for very small ratios.
+            if (leftRowCount < rightRowCount * SWAP_THRESHOLD_TRADITIONAL) {
                 return join.swap();
             }
         }
