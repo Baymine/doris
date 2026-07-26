@@ -94,6 +94,9 @@ public class HiveMetaStoreClientHelper {
 
     private static final Pattern digitPattern = Pattern.compile("(\\d+)");
 
+    public static final int HIVE_DEFAULT_DECIMAL_PRECISION = 38;
+    public static final int HIVE_DEFAULT_DECIMAL_SCALE = 10;
+
     public static final String HIVE_JSON_SERDE = "org.apache.hive.hcatalog.data.JsonSerDe";
     public static final String LEGACY_HIVE_JSON_SERDE = "org.apache.hadoop.hive.serde2.JsonSerDe";
     public static final String OPENX_JSON_SERDE = "org.openx.data.jsonserde.JsonSerDe";
@@ -716,8 +719,8 @@ public class HiveMetaStoreClientHelper {
         }
         if (lowerCaseType.startsWith("decimal")) {
             Matcher match = digitPattern.matcher(lowerCaseType);
-            int precision = ScalarType.DEFAULT_PRECISION;
-            int scale = ScalarType.DEFAULT_SCALE;
+            int precision = HIVE_DEFAULT_DECIMAL_PRECISION;
+            int scale = HIVE_DEFAULT_DECIMAL_SCALE;
             if (match.find()) {
                 precision = Integer.parseInt(match.group(1));
             }
