@@ -205,6 +205,7 @@ public class CheckCast implements ExpressionPatternRuleFactory {
         // bitmap
         allowedTypes = Sets.newHashSet();
         allowedTypes.add(BitmapType.class);
+        allowToStringLikeType(allowedTypes);
         strictCastWhiteList.put(BitmapType.class, allowedTypes);
 
         // hll
@@ -396,6 +397,9 @@ public class CheckCast implements ExpressionPatternRuleFactory {
             return !checkTypeContainsType(targetType, HllType.class)
                     && !checkTypeContainsType(targetType, BitmapType.class)
                     && !checkTypeContainsType(targetType, QuantileStateType.class);
+        }
+        if (originalType instanceof BitmapType && targetType instanceof VarcharType) {
+            return true;
         }
         if (originalType instanceof AggStateType && targetType instanceof CharacterType) {
             return true;
