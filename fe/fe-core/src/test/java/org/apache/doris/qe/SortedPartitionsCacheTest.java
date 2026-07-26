@@ -75,7 +75,12 @@ public class SortedPartitionsCacheTest extends TestWithFeService {
         NereidsSortedPartitionsCacheManager sortedPartitionsCacheManager = currentEnv.getSortedPartitionsCacheManager();
         Assertions.assertEquals(2, sortedPartitionsCacheManager.getPartitionCaches().asMap().size());
 
-        executeNereidsSql("admin set frontend config ('cache_partition_meta_table_manage_num'='1')");
+        // cache_partition_meta_table_manage_num is now a weighted cap on the
+        // SUM of partitions across all cached tables (weight per entry =
+        // partition count). Each test table has 14 partitions, so setting the
+        // cap to 14 lets exactly one table stay in the cache; the other is
+        // evicted to satisfy the weight limit.
+        executeNereidsSql("admin set frontend config ('cache_partition_meta_table_manage_num'='14')");
         Assertions.assertEquals(1, sortedPartitionsCacheManager.getPartitionCaches().asMap().size());
     }
 }

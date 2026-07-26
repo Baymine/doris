@@ -135,19 +135,72 @@ public class NereidsSortedPartitionsCacheManager {
         if (sortedPartitionRanges == null) {
             return null;
         }
+        return cacheOrBypass(key, table, scan, sortedPartitionRanges,
+                Config.cache_partition_meta_table_max_partition_num);
+    }
+
+    /**
+     * Either cache the freshly built ranges and return them, or bypass the
+     * cache and just return them. Huge-partition tables fall in the bypass
+     * branch so a single such table cannot pin tens of MB of PartitionItem /
+     * Range / LiteralExpr objects in the soft-ref pool across queries.
+     */
+    @VisibleForTesting
+    SortedPartitionRanges<?> cacheOrBypass(TableIdentifier key,
+            SupportBinarySearchFilteringPartitions table, CatalogRelation scan,
+            SortedPartitionRanges<?> sortedPartitionRanges, int maxPartitionPerTable)
+            throws RpcException {
+        if (shouldBypassCache(sortedPartitionRanges, maxPartitionPerTable)) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("bypass NereidsSortedPartitions cache for {} (partitions={}, threshold={})",
+                        key, sortedPartitionRanges.sortedPartitions.size()
+                                + sortedPartitionRanges.defaultPartitions.size(),
+                        maxPartitionPerTable);
+            }
+            return sortedPartitionRanges;
+        }
         PartitionCacheContext context = new PartitionCacheContext(
                 table.getId(), table.getPartitionMetaVersion(scan), sortedPartitionRanges);
         partitionCaches.put(key, context);
         return sortedPartitionRanges;
     }
 
+    /**
+     * Decide whether a freshly built {@link SortedPartitionRanges} is too big
+     * to keep in the shared cache. Bypassing it means: this query still uses
+     * binary-search pruning (the ranges are returned to the caller), but the
+     * sorted ranges are not retained for other queries.
+     * <p>
+     * Threshold is the sum of regular (sortedPartitions) + default partitions
+     * because both contribute to memory. A negative or zero threshold disables
+     * the bypass.
+     */
+    @VisibleForTesting
+    static boolean shouldBypassCache(SortedPartitionRanges<?> sortedPartitionRanges, int threshold) {
+        if (threshold <= 0) {
+            return false;
+        }
+        int partitionCount = sortedPartitionRanges.sortedPartitions.size()
+                + sortedPartitionRanges.defaultPartitions.size();
+        return partitionCount > threshold;
+    }
+
     private static Cache<TableIdentifier, PartitionCacheContext> buildCaches(
             int sortedPartitionTableManageNum, int expireSortedPartitionTableInFeSecond) {
-        Caffeine<Object, Object> cacheBuilder = Caffeine.newBuilder()
+        Caffeine<TableIdentifier, PartitionCacheContext> cacheBuilder = Caffeine.newBuilder()
                 // auto evict cache when jvm memory too low
-                .softValues();
+                .softValues()
+                // Weight every entry by its partition count so the configured
+                // limit caps the SUM of partitions across all cached tables.
+                // Without a weigher, 100 cached entries can pin gigabytes if any
+                // are huge-partition tables; per-table size grows linearly with
+                // partition count (PartitionItem + Range + LiteralExpr graph).
+                .weigher((TableIdentifier k, PartitionCacheContext v) -> {
+                    SortedPartitionRanges<?> ranges = v.sortedPartitionRanges;
+                    return ranges.sortedPartitions.size() + ranges.defaultPartitions.size();
+                });
         if (sortedPartitionTableManageNum > 0) {
-            cacheBuilder = cacheBuilder.maximumSize(sortedPartitionTableManageNum);
+            cacheBuilder = cacheBuilder.maximumWeight(sortedPartitionTableManageNum);
         }
         if (expireSortedPartitionTableInFeSecond > 0) {
             cacheBuilder = cacheBuilder.expireAfterAccess(Duration.ofSeconds(expireSortedPartitionTableInFeSecond));

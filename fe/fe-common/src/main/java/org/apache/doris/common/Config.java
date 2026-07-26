@@ -2300,11 +2300,20 @@ public class Config extends ConfigBase {
     @ConfField(
             mutable = true,
             callbackClassString = "org.apache.doris.common.cache.NereidsSortedPartitionsCacheManager$UpdateConfig",
-            description = {"Currently defaults to 100. This is used to control the number of ordered "
-                    + "partition metadata caches in NereidsSortedPartitionsCacheManager, "
-                    + "and to accelerate partition pruning."}
+            description = {"Capacity (maximumWeight) of NereidsSortedPartitionsCacheManager. The weight of each "
+                    + "entry equals its partition count, so this value caps the SUM of partitions "
+                    + "across all cached tables (default 50000). Used to accelerate partition pruning."}
     )
-    public static int cache_partition_meta_table_manage_num = 100;
+    public static int cache_partition_meta_table_manage_num = 50000;
+
+    @ConfField(
+            mutable = true,
+            description = {"Per-table partition-count threshold for NereidsSortedPartitionsCacheManager. "
+                    + "Tables with partition count exceeding this value will NOT have their sorted "
+                    + "partition metadata cached, preventing FE memory pressure and GC jitter from "
+                    + "huge-partition tables. Set to 0 or negative to disable the threshold."}
+    )
+    public static int cache_partition_meta_table_max_partition_num = 1024;
 
     /**
      * HBO plan stats. cache number which can be reused for the next query.
