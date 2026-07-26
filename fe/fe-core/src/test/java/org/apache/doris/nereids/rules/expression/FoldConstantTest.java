@@ -123,6 +123,7 @@ import org.apache.doris.nereids.types.DecimalV3Type;
 import org.apache.doris.nereids.types.DoubleType;
 import org.apache.doris.nereids.types.FloatType;
 import org.apache.doris.nereids.types.IntegerType;
+import org.apache.doris.nereids.types.StringType;
 import org.apache.doris.nereids.types.TinyIntType;
 import org.apache.doris.nereids.types.VarcharType;
 import org.apache.doris.nereids.util.MemoTestUtils;
@@ -531,6 +532,36 @@ class FoldConstantTest extends ExpressionRewriteTestHelper {
         f = new FromUnixtime(DecimalV3Literal.of(new BigDecimal("1761548288.100000")));
         rewritten = executor.rewrite(f, context);
         Assertions.assertEquals(new VarcharLiteral("2025-10-27 14:58:08.100000"), rewritten);
+
+        // test from_unixtime with negative value, should return NULL
+        FromUnixtime futNeg = new FromUnixtime(new BigIntLiteral(-1L), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(futNeg, context);
+        Assertions.assertEquals(new NullLiteral(StringType.INSTANCE), rewritten);
+
+        // test from_unixtime with negative value -3, should return NULL
+        FromUnixtime futNeg2 = new FromUnixtime(new BigIntLiteral(-3L), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(futNeg2, context);
+        Assertions.assertEquals(new NullLiteral(StringType.INSTANCE), rewritten);
+
+        // test from_unixtime with valid positive value 33
+        FromUnixtime futPos33 = new FromUnixtime(new BigIntLiteral(33L), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(futPos33, context);
+        Assertions.assertEquals(new VarcharLiteral("1970-01-01 08:00:33"), rewritten);
+
+        // test from_unixtime with valid positive value 13
+        FromUnixtime futPos13 = new FromUnixtime(new BigIntLiteral(13L), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(futPos13, context);
+        Assertions.assertEquals(new VarcharLiteral("1970-01-01 08:00:13"), rewritten);
+
+        // test from_unixtime with 0 (epoch)
+        FromUnixtime futZero = new FromUnixtime(new BigIntLiteral(0L), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(futZero, context);
+        Assertions.assertEquals(new VarcharLiteral("1970-01-01 08:00:00"), rewritten);
+
+        // test from_unixtime with negative decimal value, should return NULL
+        FromUnixtime futNegDecimal = new FromUnixtime(DecimalV3Literal.of(new BigDecimal("-1.5")));
+        rewritten = executor.rewrite(futNegDecimal, context);
+        Assertions.assertEquals(new NullLiteral(StringType.INSTANCE), rewritten);
 
         UnixTimestamp ut = new UnixTimestamp(StringLiteral.of("2021-11-11"), StringLiteral.of("%Y-%m-%d"));
         rewritten = executor.rewrite(ut, context);

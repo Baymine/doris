@@ -133,7 +133,7 @@ public:
     }
 
     DataTypePtr get_return_type_impl(const ColumnsWithTypeAndName& arguments) const override {
-        return std::make_shared<DataTypeString>();
+        return make_nullable(std::make_shared<DataTypeString>());
     }
 
     // avoid random value of nested for null row which would cause false positive of out of range error.
@@ -146,19 +146,23 @@ public:
                 assert_cast<const ColumnType&>(*block.get_by_position(arguments[0]).column);
 
         auto col_res = ColumnString::create();
+        auto null_map = ColumnUInt8::create();
+        auto& null_map_data = null_map->get_data();
+        null_map_data.resize_fill(input_rows_count, 0);
 
         // in open we have checked the second argument is constant,
-        RETURN_IF_ERROR(
-                vector_constant(context, sources, col_res->get_chars(), col_res->get_offsets()));
+        RETURN_IF_ERROR(vector_constant(context, sources, col_res->get_chars(),
+                                        col_res->get_offsets(), null_map_data));
 
-        block.get_by_position(result).column = std::move(col_res);
+        block.get_by_position(result).column =
+                ColumnNullable::create(std::move(col_res), std::move(null_map));
 
         return Status::OK();
     }
 
     Status vector_constant(FunctionContext* context, const ColumnType& col,
-                           ColumnString::Chars& res_data,
-                           ColumnString::Offsets& res_offsets) const {
+                           ColumnString::Chars& res_data, ColumnString::Offsets& res_offsets,
+                           ColumnUInt8::Container& null_map_data) const {
         auto* format_state = reinterpret_cast<FormatState*>(
                 context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
         if (!format_state) {
@@ -190,11 +194,7 @@ public:
                             col.get_intergral_part(i), col.get_fractional_part(i), format, res_data,
                             offset, context->state()->timezone_obj());
                     if (invalid) [[unlikely]] {
-                        throw_invalid_strings(
-                                name,
-                                fmt::format(FMT_COMPILE("{}.{}"), col.get_intergral_part(i),
-                                            col.get_fractional_part(i)),
-                                format_state->format_str);
+                        null_map_data[i] = true;
                     }
                     res_offsets[i] = cast_set<uint32_t>(offset);
                 }
@@ -205,11 +205,7 @@ public:
                                     col.get_intergral_part(i), col.get_fractional_part(i), format,
                                     res_data, offset, context->state()->timezone_obj());
                     if (invalid) [[unlikely]] {
-                        throw_invalid_strings(
-                                name,
-                                fmt::format(FMT_COMPILE("{}.{}"), col.get_intergral_part(i),
-                                            col.get_fractional_part(i)),
-                                format_state->format_str);
+                        null_map_data[i] = true;
                     }
                     res_offsets[i] = cast_set<uint32_t>(offset);
                 }
@@ -225,18 +221,7 @@ public:
                                     pod_array[i], format, res_data, offset,
                                     context->state()->timezone_obj());
                             if (invalid) [[unlikely]] {
-                                if constexpr (std::is_same_v<ColumnType, ColumnDate> ||
-                                              std::is_same_v<ColumnType, ColumnDateV2> ||
-                                              std::is_same_v<ColumnType, ColumnDateTime> ||
-                                              std::is_same_v<ColumnType, ColumnDateTimeV2> ||
-                                              std::is_same_v<ColumnType, ColumnTimeStampTz>) {
-                                    char buf[64];
-                                    pod_array[i].to_string(buf);
-                                    throw_invalid_strings(name, buf, format_state->format_str);
-                                } else {
-                                    throw_invalid_strings(name, std::to_string(pod_array[i]),
-                                                          format_state->format_str);
-                                }
+                                null_map_data[i] = true;
                             }
                             res_offsets[i] = cast_set<uint32_t>(offset);
                         }

@@ -232,6 +232,33 @@ TEST(VTimestampFunctionsTest, from_unix_test) {
         };
         static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
     }
+    // Test with negative values - should return NULL
+    {
+        InputTypeSet input_types = {PrimitiveType::TYPE_BIGINT};
+        DataSet data_set = {
+                {{int64_t(-1)}, Null()},
+                {{int64_t(-3)}, Null()},
+        };
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    // Test with valid positive values
+    {
+        InputTypeSet input_types = {PrimitiveType::TYPE_BIGINT};
+        DataSet data_set = {
+                {{int64_t(33)}, std::string("1970-01-01 08:00:33")},
+                {{int64_t(13)}, std::string("1970-01-01 08:00:13")},
+                {{int64_t(0)}, std::string("1970-01-01 08:00:00")},
+        };
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    // Test with NULL input - should return NULL
+    {
+        InputTypeSet input_types = {PrimitiveType::TYPE_BIGINT};
+        DataSet data_set = {
+                {{Null()}, Null()},
+        };
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
 }
 
 TEST(VTimestampFunctionsTest, unix_timestamp_test) {
