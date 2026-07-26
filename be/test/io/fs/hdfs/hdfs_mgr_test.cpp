@@ -228,6 +228,71 @@ TEST_F(HdfsMgrTest, ConcurrentAccess) {
     }
 }
 
+// Distinct cache keys land on (mostly) distinct shards. Hammer many keys from many
+// threads at once: every key must end up with exactly one handler, and every reader
+// of a given key must observe that same shared handler. This exercises the sharded
+// routing plus the shared_lock hit path.
+TEST_F(HdfsMgrTest, ConcurrentAccessAcrossShards) {
+    const int NUM_KEYS = 32;
+    const int READERS_PER_KEY = 8;
+
+    std::vector<std::thread> threads;
+    std::vector<std::vector<std::shared_ptr<HdfsHandler>>> handlers(
+            NUM_KEYS, std::vector<std::shared_ptr<HdfsHandler>>(READERS_PER_KEY));
+
+    for (int k = 0; k < NUM_KEYS; k++) {
+        // Distinct fs_name per key -> distinct hash_code -> spread across shards.
+        std::string fs_name = "test_fs_" + std::to_string(k);
+        for (int r = 0; r < READERS_PER_KEY; r++) {
+            threads.emplace_back([this, &handlers, k, r, fs_name]() {
+                THdfsParams params = create_test_params("test_user");
+                ASSERT_TRUE(_hdfs_mgr->get_or_create_fs(params, fs_name, &handlers[k][r]).ok());
+            });
+        }
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    // One handler per distinct key.
+    ASSERT_EQ(_hdfs_mgr->get_fs_handlers_size(), NUM_KEYS);
+    for (int k = 0; k < NUM_KEYS; k++) {
+        ASSERT_TRUE(handlers[k][0] != nullptr);
+        for (int r = 1; r < READERS_PER_KEY; r++) {
+            ASSERT_EQ(handlers[k][0], handlers[k][r]) << "key index " << k << " reader " << r;
+        }
+    }
+}
+
+// A cache hit must be served without holding an exclusive lock: many concurrent
+// readers of an already-created handler should all succeed and observe the same
+// instance (regression guard for the shared_lock fast path).
+TEST_F(HdfsMgrTest, ConcurrentHitsShareHandler) {
+    THdfsParams seed_params = create_test_params("test_user");
+    std::shared_ptr<HdfsHandler> seed;
+    ASSERT_TRUE(_hdfs_mgr->get_or_create_fs(seed_params, "hot_fs", &seed).ok());
+    ASSERT_TRUE(seed != nullptr);
+
+    const int NUM_THREADS = 16;
+    std::vector<std::thread> threads;
+    std::vector<std::shared_ptr<HdfsHandler>> handlers(NUM_THREADS);
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads.emplace_back([this, &handlers, i]() {
+            THdfsParams params = create_test_params("test_user");
+            ASSERT_TRUE(_hdfs_mgr->get_or_create_fs(params, "hot_fs", &handlers[i]).ok());
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    ASSERT_EQ(_hdfs_mgr->get_fs_handlers_size(), 1);
+    for (int i = 0; i < NUM_THREADS; i++) {
+        ASSERT_EQ(seed, handlers[i]);
+    }
+}
+
 // Test sharing of KerberosTicketCache between handlers
 // TEST_F(HdfsMgrTest, SharedKerberosTicketCache) {
 //     // Create handlers with same Kerberos credentials

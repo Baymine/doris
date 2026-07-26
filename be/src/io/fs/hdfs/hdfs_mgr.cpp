@@ -67,14 +67,15 @@ void HdfsMgr::_cleanup_loop() {
 
         // Only perform cleanup if enough time has passed
         if (current_time - last_cleanup_time >= _cleanup_interval_seconds) {
-            // Collect expired handlers under lock
+            // Collect expired handlers, locking one shard at a time so cleanup of one
+            // namenode's handlers never blocks hits on another shard.
             std::vector<std::shared_ptr<HdfsHandler>> handlers_to_cleanup;
-            {
-                std::lock_guard<std::mutex> lock(_mutex);
+            for (Shard& shard : _shards) {
+                std::lock_guard<std::shared_mutex> lock(shard.mutex);
                 std::vector<uint64_t> to_remove;
 
                 // Find expired handlers
-                for (const auto& entry : _fs_handlers) {
+                for (const auto& entry : shard.fs_handlers) {
                     bool is_expired = current_time - entry.second->last_access_time >=
                                       _instance_timeout_seconds;
                     // bool is_krb_expired =
@@ -96,7 +97,7 @@ void HdfsMgr::_cleanup_loop() {
 
                 // Remove expired handlers from map under lock
                 for (uint64_t hash_code : to_remove) {
-                    _fs_handlers.erase(hash_code);
+                    shard.fs_handlers.erase(hash_code);
                 }
             }
 
@@ -135,12 +136,14 @@ Status HdfsMgr::get_or_create_fs(const THdfsParams& hdfs_params, const std::stri
     }
 #endif
     uint64_t hash_code = _hdfs_hash_code(hdfs_params, fs_name);
+    Shard& shard = _shard_for(hash_code);
 
-    // First check without lock
+    // Fast path: a cache hit only needs a shared lock, so concurrent readers do not
+    // serialize. last_access_time is atomic, so the bump is race-free here.
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _fs_handlers.find(hash_code);
-        if (it != _fs_handlers.end()) {
+        std::shared_lock<std::shared_mutex> read_lock(shard.mutex);
+        auto it = shard.fs_handlers.find(hash_code);
+        if (it != shard.fs_handlers.end()) {
             LOG(INFO) << "Reuse existing HDFS handler, hash_code=" << hash_code
                       << ", is_kerberos=" << it->second->is_kerberos_auth
                       << ", principal=" << it->second->principal << ", fs_name=" << fs_name;
@@ -157,11 +160,11 @@ Status HdfsMgr::get_or_create_fs(const THdfsParams& hdfs_params, const std::stri
     std::shared_ptr<HdfsHandler> new_fs_handler;
     RETURN_IF_ERROR(_create_hdfs_fs(hdfs_params, fs_name, &new_fs_handler));
 
-    // Double check with lock before inserting
+    // Double check with the exclusive lock before inserting
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _fs_handlers.find(hash_code);
-        if (it != _fs_handlers.end()) {
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.fs_handlers.find(hash_code);
+        if (it != shard.fs_handlers.end()) {
             // Another thread has created the handler, use it instead
             LOG(INFO) << "Another thread created HDFS handler, reuse it, hash_code=" << hash_code
                       << ", is_kerberos=" << it->second->is_kerberos_auth
@@ -173,7 +176,7 @@ Status HdfsMgr::get_or_create_fs(const THdfsParams& hdfs_params, const std::stri
 
         // Store the new handler
         *fs_handler = new_fs_handler;
-        _fs_handlers[hash_code] = new_fs_handler;
+        shard.fs_handlers[hash_code] = new_fs_handler;
 
         LOG(INFO) << "Finished create new HDFS handler, hash_code=" << hash_code
                   << ", is_kerberos=" << new_fs_handler->is_kerberos_auth
@@ -232,6 +235,21 @@ Status HdfsMgr::_create_hdfs_fs(const THdfsParams& hdfs_params, const std::strin
         st = Status::Error<ErrorCode::INTERNAL_ERROR, false>(msg);
     }
     return st;
+}
+
+size_t HdfsMgr::get_fs_handlers_size() const {
+    size_t total = 0;
+    for (const Shard& shard : _shards) {
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        total += shard.fs_handlers.size();
+    }
+    return total;
+}
+
+bool HdfsMgr::has_fs_handler(uint64_t hash_code) const {
+    const Shard& shard = _shard_for(hash_code);
+    std::shared_lock<std::shared_mutex> lock(shard.mutex);
+    return shard.fs_handlers.find(hash_code) != shard.fs_handlers.end();
 }
 
 uint64_t HdfsMgr::_hdfs_hash_code(const THdfsParams& hdfs_params, const std::string& fs_name) {

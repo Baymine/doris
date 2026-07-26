@@ -19,9 +19,11 @@
 
 #include <gen_cpp/PlanNodes_types.h>
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -46,10 +48,8 @@ public:
 protected:
     // For testing purpose
     friend class HdfsMgrTest;
-    size_t get_fs_handlers_size() const { return _fs_handlers.size(); }
-    bool has_fs_handler(uint64_t hash_code) const {
-        return _fs_handlers.find(hash_code) != _fs_handlers.end();
-    }
+    size_t get_fs_handlers_size() const;
+    bool has_fs_handler(uint64_t hash_code) const;
     void set_instance_timeout_seconds(int64_t timeout_seconds) {
         _instance_timeout_seconds = timeout_seconds;
     }
@@ -78,8 +78,29 @@ private:
                            std::shared_ptr<HdfsHandler>* fs_handler);
 
 private:
-    std::mutex _mutex;
-    std::unordered_map<uint64_t, std::shared_ptr<HdfsHandler>> _fs_handlers;
+    // The handler cache is partitioned into fixed shards keyed by the low bits of
+    // hash_code. get_or_create_fs runs once per opened file / split, so it is on a
+    // hot path; sharding gives two wins:
+    //   1. Cache hits take a shared_lock, so concurrent scan threads reading
+    //      different (or the same) handler no longer serialize on one global mutex.
+    //      last_access_time is std::atomic, so bumping it under a shared_lock is safe.
+    //   2. Distinct hash_codes mostly land in distinct shards, so a slow miss
+    //      (hdfsBuilderConnect) on one namenode does not block hits on another.
+    // Power-of-two shard count lets us mask instead of modulo; hash_code is already a
+    // good hash (crc32 of the connection identity), so no extra hashing is needed.
+    static constexpr size_t kShardCount = 16;
+
+    struct Shard {
+        mutable std::shared_mutex mutex;
+        std::unordered_map<uint64_t, std::shared_ptr<HdfsHandler>> fs_handlers;
+    };
+
+    Shard& _shard_for(uint64_t hash_code) { return _shards[hash_code & (kShardCount - 1)]; }
+    const Shard& _shard_for(uint64_t hash_code) const {
+        return _shards[hash_code & (kShardCount - 1)];
+    }
+
+    std::array<Shard, kShardCount> _shards;
 
     std::atomic<bool> _should_stop_cleanup_thread;
     std::unique_ptr<std::thread> _cleanup_thread;
