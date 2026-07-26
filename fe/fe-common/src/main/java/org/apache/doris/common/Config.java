@@ -3735,4 +3735,12 @@ public class Config extends ConfigBase {
                     + "（持有主副本的桶），并在单个 tablet 写入量超过阈值（默认 200 MB）后在本地桶之间轮转。"
                     + "可降低导入内存压力并提升随机分桶表的吞吐量，覆盖所有导入类型。"})
     public static boolean enable_adaptive_random_bucket_load = true;
+
+    /**
+     * Max depth of exception chain to print when building FunctionGenTable fails.
+     * This helps users see the complete error chain to identify the root cause.
+     */
+    @ConfField(mutable = true, description = {"构建FunctionGenTable失败时打印异常链的最大深度",
+            "Max depth of exception chain to print when building FunctionGenTable fails"})
+    public static int max_exception_chain_depth = 5;
 }
