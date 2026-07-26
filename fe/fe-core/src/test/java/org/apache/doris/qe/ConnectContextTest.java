@@ -811,4 +811,24 @@ public class ConnectContextTest {
         Mockito.verify(failing, Mockito.times(1)).finalizeArrowFlightQuery();
         Mockito.verify(healthy, Mockito.times(1)).finalizeArrowFlightQuery();
     }
+
+    @Test
+    public void testTotalScanBytes() {
+        ConnectContext context = new ConnectContext();
+
+        // Test initial value
+        Assert.assertEquals(0L, context.getTotalScanBytes());
+
+        // Test add scan bytes
+        context.addToTotalScanBytes(1000L);
+        Assert.assertEquals(1000L, context.getTotalScanBytes());
+
+        // Test accumulate
+        context.addToTotalScanBytes(2000L);
+        Assert.assertEquals(3000L, context.getTotalScanBytes());
+
+        // Test reset
+        context.resetTotalScanBytes();
+        Assert.assertEquals(0L, context.getTotalScanBytes());
+    }
 }

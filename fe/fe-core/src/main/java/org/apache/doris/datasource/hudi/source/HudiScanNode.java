@@ -43,6 +43,7 @@ import org.apache.doris.datasource.mvcc.MvccUtil;
 import org.apache.doris.fs.DirectoryLister;
 import org.apache.doris.planner.PlanNodeId;
 import org.apache.doris.planner.ScanContext;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.spi.Split;
 import org.apache.doris.thrift.TExplainLevel;
@@ -480,7 +481,26 @@ public class HudiScanNode extends HiveScanNode {
         } catch (Exception e) {
             throw new UserException(ExceptionUtils.getRootCauseMessage(e), e);
         }
+        checkTotalScanBytes(splits);
         return splits;
+    }
+
+    private void checkTotalScanBytes(List<Split> splits) throws AnalysisException {
+        if (ConnectContext.get() == null) {
+            return;
+        }
+        long totalFileSize = 0;
+        for (Split split : splits) {
+            totalFileSize += split.getLength();
+        }
+        ConnectContext.get().addToTotalScanBytes(totalFileSize);
+        if (ConnectContext.get().getTotalScanBytes()
+                > sessionVariable.getMaxSelectedTotalScanBytes()) {
+            throw new AnalysisException("the total scan bytes: "
+                    + ConnectContext.get().getTotalScanBytes()
+                    + " has exceed max bytes for total scan: "
+                    + sessionVariable.getMaxSelectedTotalScanBytes());
+        }
     }
 
     private void initPrunedPartitions() throws UserException {

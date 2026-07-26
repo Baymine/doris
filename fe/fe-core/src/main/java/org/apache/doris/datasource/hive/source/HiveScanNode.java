@@ -387,7 +387,7 @@ public class HiveScanNode extends FileQueryScanNode {
     }
 
     private long determineTargetFileSplitSize(List<FileCacheValue> fileCaches,
-            boolean isBatchMode) {
+            boolean isBatchMode) throws AnalysisException {
         if (sessionVariable.getFileSplitSize() > 0) {
             return sessionVariable.getFileSplitSize();
         }
@@ -411,6 +411,16 @@ public class HiveScanNode extends FileQueryScanNode {
                                 * sessionVariable.getMaxInitialSplitNum()) {
                     exceedInitialThreshold = true;
                 }
+            }
+        }
+        if (ConnectContext.get() != null) {
+            ConnectContext.get().addToTotalScanBytes(totalFileSize);
+            if (ConnectContext.get().getTotalScanBytes()
+                    > sessionVariable.getMaxSelectedTotalScanBytes()) {
+                throw new AnalysisException("the total scan bytes: "
+                        + ConnectContext.get().getTotalScanBytes()
+                        + " has exceed max bytes for total scan: "
+                        + sessionVariable.getMaxSelectedTotalScanBytes());
             }
         }
         result = exceedInitialThreshold ? sessionVariable.getMaxSplitSize() : result;

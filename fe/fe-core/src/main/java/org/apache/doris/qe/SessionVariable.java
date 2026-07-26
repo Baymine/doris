@@ -100,6 +100,7 @@ public class SessionVariable implements Serializable, Writable {
     public static final String MIN_SCANNERS_CONCURRENCY = "min_scanners_concurrency";
     public static final String MIN_FILE_SCANNERS_CONCURRENCY = "min_file_scanners_concurrency";
     public static final String MIN_SCAN_SCHEDULER_CONCURRENCY = "min_scan_scheduler_concurrency";
+    public static final String MAX_SELECTED_TOTAL_SCAN_BYTES = "max_selected_total_scan_bytes";
     public static final String QUERY_TIMEOUT = "query_timeout";
     public static final String ANALYZE_TIMEOUT = "analyze_timeout";
 
@@ -1166,6 +1167,16 @@ public class SessionVariable implements Serializable, Writable {
     @VarAttrDef.VarAttr(name = MAX_FILE_SCANNERS_CONCURRENCY, needForward = true, description = {
             "FileScanNode 扫描数据的最大并发，默认为 16", "The max threads to read data of FileScanNode, default 16"})
     public int maxFileScannersConcurrency = 16;
+
+    @VarAttrDef.VarAttr(name = MAX_SELECTED_TOTAL_SCAN_BYTES, needForward = true, description = {
+            "单个查询在 Hive/Hudi/Iceberg 外表上累计扫描字节数的上限，默认 100TB，超出时查询失败",
+            "Per-query cumulative scan-byte cap across Hive/Hudi/Iceberg external tables, "
+                    + "default 100TB; the query fails fast when exceeded"})
+    public long maxSelectedTotalScanBytes = 100L * 1024L * 1024L * 1024L * 1024L; // 100TB
+
+    public long getMaxSelectedTotalScanBytes() {
+        return maxSelectedTotalScanBytes;
+    }
 
     @VarAttrDef.VarAttr(name = ENABLE_FILE_SCANNER_V2, needForward = true, fuzzy = true, description = {
             "开启后 FileScanNode 会在支持的查询场景使用 FileScannerV2，默认开启",

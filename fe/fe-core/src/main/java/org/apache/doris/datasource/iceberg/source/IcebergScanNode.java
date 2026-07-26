@@ -25,6 +25,7 @@ import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.TableIf;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.profile.SummaryProfile;
 import org.apache.doris.common.security.authentication.ExecutionAuthenticator;
@@ -1204,6 +1205,7 @@ public class IcebergScanNode extends FileQueryScanNode {
             }
             selectedPartitionNum = partitionMapInfos.size();
             recordManifestCacheProfile();
+            checkTotalScanBytes(splits);
             return splits;
         }
 
@@ -1225,6 +1227,7 @@ public class IcebergScanNode extends FileQueryScanNode {
                 setPushDownCount(countFromSnapshot);
                 assignCountToSplits(splits, countFromSnapshot);
                 recordManifestCacheProfile();
+                checkTotalScanBytes(splits);
                 return splits;
             } else {
                 fileScanTasks.forEach(taskGrp -> splits.add(createIcebergSplit(taskGrp)));
@@ -1239,7 +1242,26 @@ public class IcebergScanNode extends FileQueryScanNode {
 
         selectedPartitionNum = partitionMapInfos.size();
         recordManifestCacheProfile();
+        checkTotalScanBytes(splits);
         return splits;
+    }
+
+    private void checkTotalScanBytes(List<Split> splits) throws AnalysisException {
+        if (ConnectContext.get() == null) {
+            return;
+        }
+        long totalFileSize = 0;
+        for (Split split : splits) {
+            totalFileSize += split.getLength();
+        }
+        ConnectContext.get().addToTotalScanBytes(totalFileSize);
+        if (ConnectContext.get().getTotalScanBytes()
+                > sessionVariable.getMaxSelectedTotalScanBytes()) {
+            throw new AnalysisException("the total scan bytes: "
+                    + ConnectContext.get().getTotalScanBytes()
+                    + " has exceed max bytes for total scan: "
+                    + sessionVariable.getMaxSelectedTotalScanBytes());
+        }
     }
 
     private List<Split> doGetSystemTableSplits() throws UserException {
