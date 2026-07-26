@@ -17,6 +17,7 @@
 
 package org.apache.doris.qe;
 
+import org.apache.doris.analysis.BoolLiteral;
 import org.apache.doris.analysis.IntLiteral;
 import org.apache.doris.analysis.SetType;
 import org.apache.doris.analysis.SetVar;
@@ -400,5 +401,26 @@ public class SessionVariablesTest extends TestWithFeService {
         TQueryOptions queryOptions = variable.toThrift();
         Assertions.assertTrue(queryOptions.isSetFileCacheQueryLimitBytes());
         Assertions.assertEquals(262144L, queryOptions.getFileCacheQueryLimitBytes());
+    }
+
+    @Test
+    public void testEnableExternalFileCacheRoundtrip() throws Exception {
+        SessionVariable sv = new SessionVariable();
+        // Default is true so existing behavior (cache on) is unchanged.
+        Assertions.assertTrue(sv.getEnableExternalFileCache());
+
+        VariableMgr.setVar(sv, new SetVar(SetType.SESSION,
+                SessionVariable.ENABLE_EXTERNAL_FILE_CACHE, new BoolLiteral(false)));
+        Assertions.assertFalse(sv.getEnableExternalFileCache());
+
+        // The Hive metadata cache gate is a forwarded var (needForward = true),
+        // so a value set on the query-fe must survive the forward-to-master path.
+        Map<String, String> forwarded = sv.getForwardVariables();
+        Assertions.assertTrue(forwarded.containsKey(SessionVariable.ENABLE_EXTERNAL_FILE_CACHE));
+        Assertions.assertEquals("false", forwarded.get(SessionVariable.ENABLE_EXTERNAL_FILE_CACHE));
+
+        VariableMgr.setVar(sv, new SetVar(SetType.SESSION,
+                SessionVariable.ENABLE_EXTERNAL_FILE_CACHE, new BoolLiteral(true)));
+        Assertions.assertTrue(sv.getEnableExternalFileCache());
     }
 }

@@ -810,6 +810,8 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String ENABLE_ES_PARALLEL_SCROLL = "enable_es_parallel_scroll";
 
+    public static final String ENABLE_EXTERNAL_FILE_CACHE = "enable_external_file_cache";
+
     public static final String EXCHANGE_MULTI_BLOCKS_BYTE_SIZE = "exchange_multi_blocks_byte_size";
 
     public static final String SKIP_CHECKING_ACID_VERSION_FILE = "skip_checking_acid_version_file";
@@ -3864,6 +3866,20 @@ public class SessionVariable implements Serializable, Writable {
                             + "to exclude the impact of dangling delete files."})
     public boolean ignoreIcebergDanglingDelete = false;
 
+    // Whether enable the FE-side Hive external file metadata cache (HiveExternalMetaCache,
+    // sized by Config.max_external_file_cache_num). When a cached entry is stale or corrupted
+    // (e.g. "failed to parse the postscript"), set it to false to bypass the cache and recover.
+    @VarAttrDef.VarAttr(name = ENABLE_EXTERNAL_FILE_CACHE, needForward = true, description = {
+            "是否启用 Hive 外表文件元信息缓存（HiveExternalMetaCache，由 BE 配置项 "
+                    + "max_external_file_cache_num 控制缓存数量）。当缓存条目过期或损坏"
+                    + "（例如出现 \"failed to parse the postscript\" 错误）时，可设置为 false "
+                    + "以跳过缓存恢复查询。",
+            "Whether to enable the FE-side Hive external file metadata cache "
+                    + "(HiveExternalMetaCache, sized by BE config max_external_file_cache_num). "
+                    + "When a cached entry is stale or corrupted (e.g. \"failed to parse the "
+                    + "postscript\" error), set it to false to bypass the cache and recover."})
+    public boolean enableExternalFileCache = true;
+
     @VarAttrDef.VarAttr(name = ENABLE_ICEBERG_MERGE_PARTITIONING,
             description = {"是否启用 Iceberg UPDATE/DELETE 合并写入的双分支分发（INSERT 按分区列，DELETE 按 row_id）。",
                     "Enable merge partitioning for Iceberg UPDATE/DELETE (INSERT by partition columns, "
@@ -5567,6 +5583,14 @@ public class SessionVariable implements Serializable, Writable {
 
     public void setEnableFileCache(boolean enableFileCache) {
         this.enableFileCache = enableFileCache;
+    }
+
+    public void setEnableExternalFileCache(boolean enableExternalFileCache) {
+        this.enableExternalFileCache = enableExternalFileCache;
+    }
+
+    public boolean getEnableExternalFileCache() {
+        return enableExternalFileCache;
     }
 
     public String getFileCacheBasePath() {
