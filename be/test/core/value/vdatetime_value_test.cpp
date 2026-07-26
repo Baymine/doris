@@ -869,6 +869,38 @@ TEST(VDateTimeValueTest, date_v2_from_date_format_str_with_all_space) {
     }
 }
 
+TEST(VDateTimeValueTest, date_v2_from_date_format_str_with_empty_string) {
+    // Empty string should fail to parse with any format
+    std::string date_str = "";
+    std::string format_str = "%Y-%m-%d %H:%i:%s";
+
+    {
+        DateV2Value<DateTimeV2ValueType> date;
+        EXPECT_FALSE(date.from_date_format_str(format_str.data(), format_str.size(),
+                                               date_str.data(), date_str.size()));
+    }
+
+    {
+        DateV2Value<DateV2ValueType> date;
+        EXPECT_FALSE(date.from_date_format_str(format_str.data(), format_str.size(),
+                                               date_str.data(), date_str.size()));
+    }
+
+    {
+        VecDateTimeValue date;
+        EXPECT_FALSE(date.from_date_format_str(format_str.data(), format_str.size(),
+                                               date_str.data(), date_str.size()));
+    }
+
+    // Invalid date string should also fail
+    std::string invalid_str = "abc";
+    {
+        DateV2Value<DateTimeV2ValueType> date;
+        EXPECT_FALSE(date.from_date_format_str(format_str.data(), format_str.size(),
+                                               invalid_str.data(), invalid_str.size()));
+    }
+}
+
 TEST(VDateTimeValueTest, datetime_diff_test) {
     // Test case 1: DATE to DATE - Different years, months, days
     {

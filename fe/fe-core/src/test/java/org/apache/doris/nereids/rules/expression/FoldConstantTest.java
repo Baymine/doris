@@ -568,6 +568,16 @@ class FoldConstantTest extends ExpressionRewriteTestHelper {
         Assertions.assertEquals(new DecimalV3Literal(DecimalV3Type.createDecimalV3TypeNoCheck(18, 6),
                         new BigDecimal("1636560000.000000")), rewritten);
 
+        // test unix_timestamp with invalid empty date string, should return NULL
+        UnixTimestamp utEmpty = new UnixTimestamp(StringLiteral.of(""), StringLiteral.of("%Y-%m-%d %H:%i:%s"));
+        rewritten = executor.rewrite(utEmpty, context);
+        Assertions.assertEquals(new NullLiteral(DecimalV3Type.createDecimalV3TypeLooseCheck(18, 6)), rewritten);
+
+        // test unix_timestamp with invalid date string that doesn't match format, should return NULL
+        UnixTimestamp utInvalid = new UnixTimestamp(StringLiteral.of("abc"), StringLiteral.of("%Y-%m-%d"));
+        rewritten = executor.rewrite(utInvalid, context);
+        Assertions.assertEquals(new NullLiteral(DecimalV3Type.createDecimalV3TypeLooseCheck(18, 6)), rewritten);
+
         StrToDate sd = new StrToDate(StringLiteral.of("2021-11-11"), StringLiteral.of("%Y-%m-%d"));
         rewritten = executor.rewrite(sd, context);
         Assertions.assertEquals(new DateV2Literal("2021-11-11"), rewritten);

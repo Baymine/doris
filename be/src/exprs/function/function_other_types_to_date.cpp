@@ -823,6 +823,7 @@ struct UnixTimeStampStrImpl {
         auto col_result = ColumnDecimal64::create(input_rows_count, 6);
         auto& col_result_data = col_result->get_data();
 
+        bool has_parse_failure = false;
         const auto* col_source = assert_cast<const ColumnString*>(col_left.get());
         const auto* col_format = assert_cast<const ColumnString*>(col_right.get());
         for (size_t i = 0; i < input_rows_count; i++) {
@@ -835,7 +836,9 @@ struct UnixTimeStampStrImpl {
             DateV2Value<DateTimeV2ValueType> ts_value;
             //FIXME: use new serde to parse the input string
             if (!ts_value.from_date_format_str(fmt.data, fmt.size, source.data, source.size)) {
-                throw_invalid_strings("unix_timestamp", source, fmt);
+                result_null_map[i] = true;
+                has_parse_failure = true;
+                continue;
             }
 
             std::pair<int64_t, int64_t> timestamp {};
@@ -850,7 +853,7 @@ struct UnixTimeStampStrImpl {
             col_result_data[i] = Decimal64::from_int_frac(sec, std::stoll(ms_str), 6).value;
         }
 
-        if (null_map_left || null_map_right) {
+        if (null_map_left || null_map_right || has_parse_failure) {
             block.replace_by_position(result,
                                       ColumnNullable::create(std::move(col_result),
                                                              std::move(result_null_map_column)));

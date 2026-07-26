@@ -630,7 +630,12 @@ public class DateTimeExtractAndTransform {
             dateObj = LocalDateTime.parse(date.getValue(), formatter);
         } catch (DateTimeParseException e) {
             // means the date string doesn't contain time fields.
-            dateObj = LocalDate.parse(date.getValue(), formatter).atStartOfDay();
+            try {
+                dateObj = LocalDate.parse(date.getValue(), formatter).atStartOfDay();
+            } catch (DateTimeParseException ex) {
+                // invalid date string for the given format, return NULL
+                return new NullLiteral(DecimalV3Type.createDecimalV3TypeLooseCheck(18, 6));
+            }
         }
         return new DecimalV3Literal(DecimalV3Type.createDecimalV3TypeLooseCheck(18, 6),
                 new BigDecimal(getTimestamp(dateObj)));
