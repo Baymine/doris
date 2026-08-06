@@ -821,6 +821,10 @@ public class SessionVariable implements Serializable, Writable {
 
     public static final String SHORT_CIRCUIT_EVALUATION = "short_circuit_evaluation";
 
+    public static final String ENABLE_COST_BASED_SHORT_CIRCUIT = "enable_cost_based_short_circuit";
+
+    public static final String SHORT_CIRCUIT_COST_THRESHOLD = "short_circuit_cost_threshold";
+
     // NOTE: if you want to add some debug variables, please disable sql cache in `CacheAnalyzer.commonCacheCondition`,
     //       and set affectQueryResult=true
     public static final List<String> DEBUG_VARIABLES = ImmutableList.of(
@@ -2044,6 +2048,45 @@ public class SessionVariable implements Serializable, Writable {
     @VarAttrDef.VarAttr(name = SHORT_CIRCUIT_EVALUATION, fuzzy = true, description = { "是否启用短路求值",
             "Whether to enable short-circuit evaluation" })
     public boolean shortCircuitEvaluation = false;
+
+    @VarAttrDef.VarAttr(
+            name = ENABLE_COST_BASED_SHORT_CIRCUIT,
+            description = {"控制 CASE WHEN / if / ifnull / nvl / coalesce 是否按值分支(THEN/ELSE 或"
+                    + "首参之后的参数)的静态代价自动走惰性短路求值:代价足够高(如含 Decimal256 除法、"
+                    + "宽类型运算、函数调用等昂贵分支)时,每个值分支只在真正需要它的行上求值,而非在整块"
+                    + "所有行上把每个分支都算一遍。代价低的廉价表达式仍走原有全量求值,避免 gather 开销反噬。"
+                    + "含非确定性/有副作用函数(rand/uuid/sleep)的分支强制保持全量求值。只改执行方式,"
+                    + "不改变结果集。默认为 true。",
+                    "Controls whether CASE WHEN / if / ifnull / nvl / coalesce automatically use lazy "
+                            + "short-circuit evaluation based on the static cost of their value "
+                            + "branches (THEN/ELSE, or args after the first): when the cost is high "
+                            + "enough (Decimal256 division, wide-type arithmetic, function calls), "
+                            + "each value branch is evaluated only on the rows that need it, instead "
+                            + "of computing every branch over all rows. Cheap expressions keep the "
+                            + "original full evaluation so the gather cost never backfires. A branch "
+                            + "containing a non-deterministic / side-effecting function "
+                            + "(rand/uuid/sleep) is forced to stay eager. Changes execution only, "
+                            + "never the result set. Default is true."},
+            needForward = true)
+    public boolean enableCostBasedShortCircuit = true;
+
+    @VarAttrDef.VarAttr(
+            name = SHORT_CIRCUIT_COST_THRESHOLD,
+            description = {"代价感知短路求值的阈值:当值分支的静态代价之和达到该值时启用惰性求值。代价为"
+                    + "「运算复杂度 × 数据宽度」通用模型(除法/取模 12、乘法 5、加减 3,按类型字节宽度放大;"
+                    + "函数调用 100),对齐扫描层 conjunct 代价模型。默认 30,使一个 Decimal256 除法、任意"
+                    + "函数调用、或几个宽类型运算即可触发,而纯字面量/窄整数分支不触发。仅在"
+                    + "enable_cost_based_short_circuit=true 时生效。",
+                    "Cost threshold for cost-aware short-circuit evaluation: lazy evaluation engages "
+                            + "when the summed static cost of the value branches reaches this value. "
+                            + "Cost is a general operation-complexity x data-width model (divide/mod "
+                            + "12, multiply 5, add 3, scaled by type byte width; function call 100), "
+                            + "mirroring the scan-layer conjunct cost model. Default 30, so a single "
+                            + "Decimal256 divide, any function call, or a few wide-type operations "
+                            + "trip it while plain literal / narrow-integer branches do not. Only "
+                            + "effective when enable_cost_based_short_circuit=true."},
+            needForward = true)
+    public long shortCircuitCostThreshold = 30;
 
     /**
      * This variable is used to select n-th optimized plan in memo.
@@ -6550,6 +6593,22 @@ public class SessionVariable implements Serializable, Writable {
 
     public boolean isShortCircuitEvaluation() {
         return shortCircuitEvaluation;
+    }
+
+    public boolean isEnableCostBasedShortCircuit() {
+        return enableCostBasedShortCircuit;
+    }
+
+    public void setEnableCostBasedShortCircuit(boolean enableCostBasedShortCircuit) {
+        this.enableCostBasedShortCircuit = enableCostBasedShortCircuit;
+    }
+
+    public long getShortCircuitCostThreshold() {
+        return shortCircuitCostThreshold;
+    }
+
+    public void setShortCircuitCostThreshold(long shortCircuitCostThreshold) {
+        this.shortCircuitCostThreshold = shortCircuitCostThreshold;
     }
 
     public boolean isAllowModifyMaterializedViewData() {

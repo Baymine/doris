@@ -469,7 +469,15 @@ public class ExprToThriftVisitor extends ExprVisitor<Void, TExprNode> {
         }
 
         if (ConnectContext.get() != null) {
-            msg.setShortCircuitEvaluation(ConnectContext.get().getSessionVariable().isShortCircuitEvaluation());
+            // if / ifnull / nvl / coalesce compile to a BE short-circuit expr that evaluates the
+            // later arguments only on the rows still needing them; the value branches are the args
+            // after the first (the first arg always runs on all rows as the condition, so it is
+            // neither a lazy-subset guard concern nor part of the cost). Those later args are thus
+            // both the guard scope and the cost scope. Other functions have no short-circuit form,
+            // so the empty list makes the gate honor only the explicit legacy switch.
+            List<Expr> valueBranches = ShortCircuitCostGate.shortCircuitValueBranches(expr);
+            msg.setShortCircuitEvaluation(ShortCircuitCostGate.shouldShortCircuit(
+                    ConnectContext.get().getSessionVariable(), valueBranches, valueBranches));
         }
         return null;
     }
@@ -506,7 +514,14 @@ public class ExprToThriftVisitor extends ExprVisitor<Void, TExprNode> {
         msg.node_type = TExprNodeType.CASE_EXPR;
         msg.case_expr = new TCaseExpr(expr.isHasCaseExpr(), expr.isHasElseExpr());
         if (ConnectContext.get() != null) {
-            msg.setShortCircuitEvaluation(ConnectContext.get().getSessionVariable().isShortCircuitEvaluation());
+            // Lazy short-circuit (BE ShortCircuitCaseExpr) evaluates each THEN only on the rows
+            // matching its WHEN, and each later WHEN only on the rows not yet matched; the gate
+            // turns it on when the value branches are expensive enough, but forces eager if ANY
+            // child (WHEN or THEN) is non-deterministic / side-effecting -- so the guard scope is
+            // all children while only the value branches count toward cost.
+            msg.setShortCircuitEvaluation(ShortCircuitCostGate.shouldShortCircuit(
+                    ConnectContext.get().getSessionVariable(), expr.getChildren(),
+                    ShortCircuitCostGate.caseValueBranches(expr)));
         }
         return null;
     }
