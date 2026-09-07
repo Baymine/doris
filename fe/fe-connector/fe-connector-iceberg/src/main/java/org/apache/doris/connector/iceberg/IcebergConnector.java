@@ -17,6 +17,7 @@
 
 package org.apache.doris.connector.iceberg;
 
+import org.apache.doris.connector.cache.CatalogMetaCache;
 import org.apache.doris.connector.cache.ConnectorMetadataCache;
 import org.apache.doris.connector.metastore.iceberg.jdbc.IcebergJdbcMetaStoreProperties;
 import org.apache.doris.connector.metastore.iceberg.rest.IcebergRestMetaStoreProperties;
@@ -51,14 +52,15 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.BaseViewSessionCatalog;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.SessionCatalog;
-import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.catalog.ViewCatalog;
 import org.apache.iceberg.hive.HiveCatalog;
 import org.apache.iceberg.hive.HiveHadoopUtil;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.rest.RESTSessionCatalog;
 import org.apache.iceberg.util.ThreadPools;
@@ -79,6 +81,7 @@ import software.amazon.s3tables.iceberg.S3TablesProperties;
 import software.amazon.s3tables.iceberg.imports.HttpClientProperties;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
@@ -92,6 +95,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -119,6 +123,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class IcebergConnector implements Connector {
 
     private static final Logger LOG = LogManager.getLogger(IcebergConnector.class);
+    // Direct statement scopes and the cross-query cache share this ownership lookup. Weak keys avoid retaining
+    // tables loaded by callers that never install a Doris cleanup owner.
+    private static final Map<Table, FileIO> REST_TABLE_CATALOG_FILE_IO =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     /**
      * Caches {@link ClassLoader}s keyed by resolved driver URL so a given JDBC driver jar is loaded at
@@ -175,6 +183,7 @@ public class IcebergConnector implements Connector {
     private final IcebergRestMetaStoreProperties restProperties;
     private final ConnectorContext context;
     private volatile Catalog icebergCatalog;
+    private boolean closed;
     // Session-aware REST catalog, built for every REST catalog (plain or iceberg.rest.session=user). A SINGLE
     // shared instance, held as the ReauthenticatingRestSessionCatalog wrapper (BaseViewSessionCatalog) that
     // recovers from a 401 on the catalog's own identity by rebuilding the client (upstream #64966). For
@@ -194,6 +203,7 @@ public class IcebergConnector implements Connector {
     // per-user resolveTable). If you ADD a cross-query cache here or in IcebergConnectorMetadata, it MUST be
     // null under session=user and covered by IcebergConnectorCacheTest (which asserts exactly that at runtime).
     private final IcebergLatestSnapshotCache latestSnapshotCache; // null under session=user
+    private final IcebergCatalogResourceTracker catalogResourceTracker = new IcebergCatalogResourceTracker();
     // PERF-01: cross-query cache of the RAW iceberg Table (restores the legacy IcebergExternalMetaCache table
     // cache that the SPI cutover dropped). null when the catalog's credentials are query-dependent
     // (iceberg.rest.session=user / REST vended-credentials) — see the constructor. The per-statement scope
@@ -225,9 +235,10 @@ public class IcebergConnector implements Connector {
             mvccPartitionViewCache;
     private final ConnectorMetadataCache<List<ConnectorPartitionInfo>> // null under session=user
             listPartitionsViewCache;
+    private final CatalogMetaCache metaCache = new CatalogMetaCache();
     // Manifest content cache — pure metadata, default-off (meta.cache.iceberg.manifest.enable), and consumed
     // ONLY after a per-user resolveTable(ForRead) -- exempt: no read path without a per-user load.
-    private final IcebergManifestCache manifestCache = new IcebergManifestCache();
+    private final IcebergManifestCache manifestCache = new IcebergManifestCache(metaCache);
 
     // Lazily-built plugin-side Kerberos authenticator (single-owner auth; see TcclPinningConnectorContext).
     // null for a non-Kerberos catalog. Its doAs acts on the PLUGIN's UserGroupInformation copy — the one the
@@ -261,7 +272,7 @@ public class IcebergConnector implements Connector {
         this.latestSnapshotCache = isUserSessionEnabled()
                 ? null
                 : new IcebergLatestSnapshotCache(
-                        resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
+                        metaCache, resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
         // PERF-01 cross-query RAW-table cache. Disabled (null) when the catalog's credentials are
         // query-dependent, because a cached raw Table carries its FileIO's credentials:
         //   - iceberg.rest.session=user: per-user delegated FileIO -> sharing across users leaks credentials.
@@ -274,7 +285,8 @@ public class IcebergConnector implements Connector {
                 || IcebergScanPlanProvider.restVendedCredentialsEnabled(this.properties))
                 ? null
                 : new IcebergTableCache(
-                        resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
+                        metaCache, resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY,
+                        this::cachedTableCleanup, catalogResourceTracker);
         // PERF-02: partition-view cache. Authorization-sensitive projection: a shared (table+snapshot-keyed, no
         // user dimension) hit would disclose one user's partition list. Its readers are all downstream of a
         // per-user resolveTableForRead today (so a hit cannot precede authz), but that safety rests entirely on
@@ -284,13 +296,13 @@ public class IcebergConnector implements Connector {
         this.partitionCache = isUserSessionEnabled()
                 ? null
                 : new IcebergPartitionCache(
-                        resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
+                        metaCache, resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
         // PERF-03: inferred-file-format cache. Same authorization-sensitive treatment as partitionCache (disabled
         // under session=user, kept otherwise); readers already tolerate a null cache (resolveFileFormatName).
         this.formatCache = isUserSessionEnabled()
                 ? null
                 : new IcebergFormatCache(
-                        resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
+                        metaCache, resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY);
         // PERF-05: table-comment cache, built ONLY for a REST vended-credentials catalog that is NOT session=user.
         // Plain catalogs (tableCache on) already serve the comment path from tableCache; session=user is excluded
         // because a shared comment cache would bypass the per-user loadTable authorization (a metadata disclosure).
@@ -299,7 +311,7 @@ public class IcebergConnector implements Connector {
         this.commentCache = (IcebergScanPlanProvider.restVendedCredentialsEnabled(this.properties)
                 && !isUserSessionEnabled())
                 ? new IcebergCommentCache(
-                        resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY)
+                        metaCache, resolveTableCacheTtlSecond(this.properties), DEFAULT_TABLE_CACHE_CAPACITY)
                 : null;
         // PERF-06: derived partition-view cache A (generic ConnectorMetadataCache). Same
         // authorization-sensitive treatment as partitionCache -- disabled (null) under iceberg.rest.session=user so
@@ -308,10 +320,12 @@ public class IcebergConnector implements Connector {
         // framework's CacheSpec (default ON / 24h / 1000). Two typed instances (MVCC view + partition-info list).
         this.mvccPartitionViewCache = isUserSessionEnabled()
                 ? null
-                : new ConnectorMetadataCache<>("iceberg", "partition_view", this.properties);
+                : new ConnectorMetadataCache<>(metaCache, "iceberg.mvcc-partition-view",
+                        "iceberg", "partition_view", this.properties);
         this.listPartitionsViewCache = isUserSessionEnabled()
                 ? null
-                : new ConnectorMetadataCache<>("iceberg", "partition_view", this.properties);
+                : new ConnectorMetadataCache<>(metaCache, "iceberg.list-partitions-view",
+                        "iceberg", "partition_view", this.properties);
     }
 
     /**
@@ -337,7 +351,7 @@ public class IcebergConnector implements Connector {
     public ConnectorMetadata getMetadata(ConnectorSession session) {
         return new IcebergConnectorMetadata(newCatalogBackedOps(session), catalogProps, context,
                 latestSnapshotCache, tableCache, partitionCache, commentCache,
-                mvccPartitionViewCache, listPartitionsViewCache);
+                mvccPartitionViewCache, listPartitionsViewCache, catalogResourceTracker);
     }
 
     /**
@@ -603,10 +617,10 @@ public class IcebergConnector implements Connector {
         if (sc != null && !isUserSessionEnabled()) {
             ViewCatalog sharedViewCatalog = sc.asViewCatalog(SessionCatalog.SessionContext.createEmpty());
             return new IcebergCatalogOps.CatalogBackedIcebergCatalogOps(sharedCatalog, sharedViewCatalog,
-                    restFlavor, nestedNamespaceEnabled, viewEnabled, externalCatalogName);
+                    restFlavor, nestedNamespaceEnabled, viewEnabled, externalCatalogName, this::cachedTableCleanup);
         }
         return new IcebergCatalogOps.CatalogBackedIcebergCatalogOps(sharedCatalog,
-                restFlavor, nestedNamespaceEnabled, viewEnabled, externalCatalogName);
+                restFlavor, nestedNamespaceEnabled, viewEnabled, externalCatalogName, this::cachedTableCleanup);
     }
 
     /**
@@ -631,7 +645,7 @@ public class IcebergConnector implements Connector {
                 catalogProps.getExternalCatalogName();
         // restFlavor is unconditionally true here (isUserSessionEnabled() ⇒ a REST catalog).
         return new IcebergCatalogOps.CatalogBackedIcebergCatalogOps(perUserCatalog, perUserViewCatalog,
-                true, nestedNamespaceEnabled, viewEnabled, externalCatalogName);
+                true, nestedNamespaceEnabled, viewEnabled, externalCatalogName, this::cachedTableCleanup);
     }
 
     /**
@@ -643,27 +657,7 @@ public class IcebergConnector implements Connector {
      */
     @Override
     public void invalidateTable(String dbName, String tableName) {
-        if (latestSnapshotCache != null) {
-            latestSnapshotCache.invalidate(TableIdentifier.of(dbName, tableName));
-        }
-        if (tableCache != null) {
-            tableCache.invalidate(TableIdentifier.of(dbName, tableName));
-        }
-        if (partitionCache != null) {
-            partitionCache.invalidate(TableIdentifier.of(dbName, tableName));
-        }
-        if (formatCache != null) {
-            formatCache.invalidate(TableIdentifier.of(dbName, tableName));
-        }
-        if (commentCache != null) {
-            commentCache.invalidate(TableIdentifier.of(dbName, tableName));
-        }
-        if (mvccPartitionViewCache != null) {
-            mvccPartitionViewCache.invalidateTable(dbName, tableName);
-        }
-        if (listPartitionsViewCache != null) {
-            listPartitionsViewCache.invalidateTable(dbName, tableName);
-        }
+        metaCache.invalidateTable(dbName, tableName);
     }
 
     /**
@@ -679,27 +673,7 @@ public class IcebergConnector implements Connector {
      */
     @Override
     public void invalidateDb(String dbName) {
-        if (latestSnapshotCache != null) {
-            latestSnapshotCache.invalidateDb(dbName);
-        }
-        if (tableCache != null) {
-            tableCache.invalidateDb(dbName);
-        }
-        if (partitionCache != null) {
-            partitionCache.invalidateDb(dbName);
-        }
-        if (formatCache != null) {
-            formatCache.invalidateDb(dbName);
-        }
-        if (commentCache != null) {
-            commentCache.invalidateDb(dbName);
-        }
-        if (mvccPartitionViewCache != null) {
-            mvccPartitionViewCache.invalidateDb(dbName);
-        }
-        if (listPartitionsViewCache != null) {
-            listPartitionsViewCache.invalidateDb(dbName);
-        }
+        metaCache.invalidateDatabase(dbName);
     }
 
     /**
@@ -711,28 +685,8 @@ public class IcebergConnector implements Connector {
      */
     @Override
     public void invalidateAll() {
-        if (latestSnapshotCache != null) {
-            latestSnapshotCache.invalidateAll();
-        }
-        if (tableCache != null) {
-            tableCache.invalidateAll();
-        }
-        if (partitionCache != null) {
-            partitionCache.invalidateAll();
-        }
-        if (formatCache != null) {
-            formatCache.invalidateAll();
-        }
-        if (commentCache != null) {
-            commentCache.invalidateAll();
-        }
-        if (mvccPartitionViewCache != null) {
-            mvccPartitionViewCache.invalidateAll();
-        }
-        if (listPartitionsViewCache != null) {
-            listPartitionsViewCache.invalidateAll();
-        }
-        manifestCache.invalidateAll();
+        metaCache.invalidateCatalog();
+        manifestCache.clearStats();
     }
 
     /**
@@ -805,7 +759,7 @@ public class IcebergConnector implements Connector {
         // threaded for parity with the legacy single per-catalog IcebergMetadataOps.
         return new IcebergScanPlanProvider(catalogProps,
                 this::newCatalogBackedOps, context, manifestCache,
-                tableCache, formatCache);
+                tableCache, formatCache, catalogResourceTracker);
     }
 
     @Override
@@ -815,7 +769,7 @@ public class IcebergConnector implements Connector {
         // IcebergConnectorTransaction. It resolves the target via catalogOps.loadTable, so it shares the
         // fully-threaded ops (newCatalogBackedOps) — external_catalog.name must apply to INSERT/DELETE/MERGE.
         return new IcebergWritePlanProvider(catalogProps,
-                this::newCatalogBackedOps, context);
+                this::newCatalogBackedOps, context, catalogResourceTracker);
     }
 
     @Override
@@ -825,7 +779,7 @@ public class IcebergConnector implements Connector {
         // via catalogOps.loadTable, so it shares the fully-threaded ops (newCatalogBackedOps) —
         // external_catalog.name must apply to ALTER TABLE ... EXECUTE on REST 3-level catalogs.
         return new IcebergProcedureOps(properties,
-                this::newCatalogBackedOps, context);
+                this::newCatalogBackedOps, context, catalogResourceTracker);
     }
 
     /**
@@ -860,6 +814,9 @@ public class IcebergConnector implements Connector {
         // avoidance). Correct only because the connector also carries per-field ids down its column tree
         // (parseSchema withUniqueId + IcebergTypeMapping withChildrenFieldIds), which the BE field-id scan
         // path matches nested leaves by; without them a nested leaf reads NULL. Inert pre-cutover (P6.6).
+        // SUPPORTS_STORAGE_PREDICATE_PRUNING: native Iceberg data scans use the Parquet/ORC readers that can
+        // consume inferred bare-column ranges for min/max pruning. PluginDrivenSysExternalTable opts metadata
+        // tables out separately, so this catalog-wide declaration applies only to normal data-table scans.
         // SUPPORTS_METADATA_PRELOAD: legacy IcebergExternalTable.supportsExternalMetadataPreload returns true so
         // the planner async pre-warms schema/snapshot before taking the read lock; the generic plugin-driven
         // path reproduces this ONLY under this capability (PluginDrivenExternalTable.supportsExternalMetadataPreload),
@@ -875,6 +832,7 @@ public class IcebergConnector implements Connector {
                 ConnectorCapability.SUPPORTS_SHOW_CREATE_DDL,
                 ConnectorCapability.SUPPORTS_VIEW,
                 ConnectorCapability.SUPPORTS_NESTED_COLUMN_PRUNE,
+                ConnectorCapability.SUPPORTS_STORAGE_PREDICATE_PRUNING,
                 ConnectorCapability.SUPPORTS_METADATA_PRELOAD,
                 ConnectorCapability.SUPPORTS_SORT_ORDER,
                 ConnectorCapability.SUPPORTS_NESTED_COLUMN_SCHEMA_CHANGE);
@@ -899,13 +857,98 @@ public class IcebergConnector implements Connector {
                 && IcebergCatalogProperties.TYPE_REST.equals(catalogProps.getFlavor());
     }
 
-    private Catalog getOrCreateCatalog() {
-        if (icebergCatalog == null) {
-            synchronized (this) {
-                if (icebergCatalog == null) {
-                    icebergCatalog = createCatalog();
-                }
+    /**
+     * Closes a table's FileIO when the cached raw table owns it. Glue and S3Tables create a per-table
+     * S3FileIO; REST tables are closed only when they do not share the catalog-level FileIO. Other catalog
+     * flavors are left untouched because they may share a catalog-level FileIO.
+     */
+    private Runnable cachedTableCleanup(Table table) {
+        return cachedTableCleanup(table, catalogProps.getFlavor(), restSessionCatalog);
+    }
+
+    static Runnable cachedTableCleanup(Table table, String flavor) {
+        return cachedTableCleanup(table, flavor, null);
+    }
+
+    private static Runnable cachedTableCleanup(Table table, String flavor, Object catalog) {
+        if (table == null) {
+            return () -> { };
+        }
+        boolean tableOwned = false;
+        try {
+            if (IcebergCatalogProperties.TYPE_GLUE.equals(flavor)
+                    || IcebergCatalogProperties.TYPE_S3_TABLES.equals(flavor)) {
+                tableOwned = true;
+            } else if (IcebergCatalogProperties.TYPE_REST.equals(flavor)) {
+                FileIO producingCatalogFileIo = takeRestTableCatalogFileIo(table);
+                FileIO catalogFileIO = producingCatalogFileIo != null
+                        ? producingCatalogFileIo : restCatalogFileIO(catalog);
+                tableOwned = catalogFileIO != null
+                        ? shouldCloseTableFileIO(flavor, table.io(), catalogFileIO)
+                        : table.io() instanceof SupportsStorageCredentials
+                                && !((SupportsStorageCredentials) table.io()).credentials().isEmpty();
             }
+        } catch (Exception e) {
+            LOG.warn("Failed to determine Iceberg table FileIO ownership", e);
+        }
+        if (!tableOwned) {
+            return () -> { };
+        }
+        FileIO tableFileIO = table.io();
+        return () -> {
+            try {
+                tableFileIO.close();
+            } catch (Exception e) {
+                LOG.warn("Failed to close Iceberg table FileIO", e);
+            }
+        };
+    }
+
+    static boolean shouldCloseTableFileIO(String flavor, FileIO tableFileIO, FileIO catalogFileIO) {
+        if (IcebergCatalogProperties.TYPE_GLUE.equals(flavor)
+                || IcebergCatalogProperties.TYPE_S3_TABLES.equals(flavor)) {
+            return true;
+        }
+        return IcebergCatalogProperties.TYPE_REST.equals(flavor)
+                && catalogFileIO != null && tableFileIO != catalogFileIO;
+    }
+
+    static void recordRestTableCatalogFileIo(Table table, FileIO fileIo) {
+        REST_TABLE_CATALOG_FILE_IO.put(table, fileIo);
+    }
+
+    static FileIO takeRestTableCatalogFileIo(Table table) {
+        return REST_TABLE_CATALOG_FILE_IO.remove(table);
+    }
+
+    static FileIO restCatalogFileIO(Object catalog) {
+        Object current = catalog;
+        try {
+            if (current instanceof ReauthenticatingRestSessionCatalog) {
+                current = ((ReauthenticatingRestSessionCatalog) current).currentDelegate();
+            }
+            if (current instanceof RESTCatalog) {
+                Field sessionCatalogField = RESTCatalog.class.getDeclaredField("sessionCatalog");
+                sessionCatalogField.setAccessible(true);
+                current = sessionCatalogField.get(current);
+            }
+            if (current instanceof RESTSessionCatalog) {
+                Field ioField = RESTSessionCatalog.class.getDeclaredField("io");
+                ioField.setAccessible(true);
+                return (FileIO) ioField.get(current);
+            }
+        } catch (Exception e) {
+            LOG.warn("Failed to identify REST catalog FileIO; skip per-table close to protect shared IO", e);
+        }
+        return null;
+    }
+
+    private synchronized Catalog getOrCreateCatalog() {
+        if (closed) {
+            throw new IllegalStateException("Iceberg connector is already closed");
+        }
+        if (icebergCatalog == null) {
+            icebergCatalog = createCatalog();
         }
         return icebergCatalog;
     }
@@ -1055,7 +1098,12 @@ public class IcebergConnector implements Connector {
             // all call back into it, so every path inherits recovery; per-user requests are excluded by the
             // wrapper's own request-level gate (a request carrying a delegated credential is never recovered).
             ReauthenticatingRestSessionCatalog sessionCatalog = new ReauthenticatingRestSessionCatalog(
-                    rawSessionCatalog, () -> rebuildRestSessionCatalog(catalogName, frozenProps, conf));
+                    rawSessionCatalog, () -> rebuildRestSessionCatalog(catalogName, frozenProps, conf),
+                    catalogResourceTracker, () -> {
+                        if (tableCache != null) {
+                            tableCache.invalidateAll();
+                        }
+                    });
             Catalog defaultCatalog = sessionCatalog.asCatalog(SessionCatalog.SessionContext.createEmpty());
             this.restSessionCatalog = sessionCatalog;
             if (userSession) {
@@ -1578,25 +1626,40 @@ public class IcebergConnector implements Connector {
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        // Release cache-owner references first. The resource tracker keeps the catalog generation alive until
+        // every table owner that was loaded through it has also released its last statement borrower.
+        if (tableCache != null) {
+            tableCache.close();
+        }
+        manifestCache.clearStats();
+        metaCache.close();
         Catalog c = icebergCatalog;
-        if (c != null) {
-            if (c instanceof java.io.Closeable) {
-                ((java.io.Closeable) c).close();
-            }
-            icebergCatalog = null;
-        }
-        // The default catalog (asCatalog(empty)) is a lightweight view and NOT Closeable, so close the shared
-        // underlying REST session catalog (its REST client + OAuth2 auth resources) explicitly here. It is the
-        // ReauthenticatingRestSessionCatalog wrapper, a Closeable that closes its current delegate.
         BaseViewSessionCatalog sc = restSessionCatalog;
-        if (sc != null) {
-            if (sc instanceof java.io.Closeable) {
-                ((java.io.Closeable) sc).close();
+        icebergCatalog = null;
+        restSessionCatalog = null;
+        sessionCatalogAdapter = null;
+        catalogResourceTracker.close(() -> {
+            if (c instanceof java.io.Closeable) {
+                try {
+                    ((java.io.Closeable) c).close();
+                } catch (IOException | RuntimeException e) {
+                    LOG.warn("Failed to close Iceberg catalog {}", context.getCatalogName(), e);
+                }
             }
-            restSessionCatalog = null;
-            sessionCatalogAdapter = null;
-        }
+            // The REST default Catalog is a lightweight view. Close the retained session-catalog generation too.
+            if (sc instanceof java.io.Closeable && sc != c) {
+                try {
+                    ((java.io.Closeable) sc).close();
+                } catch (IOException | RuntimeException e) {
+                    LOG.warn("Failed to close Iceberg REST session catalog {}", context.getCatalogName(), e);
+                }
+            }
+        });
     }
 
     /** This catalog's engine-owned storage services (see {@link ConnectorContext#getStorageContext()}). */

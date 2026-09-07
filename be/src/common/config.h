@@ -1460,6 +1460,8 @@ DECLARE_mInt64(snii_forced_spill_min_arena_bytes);
 DECLARE_mInt32(snii_spill_max_run_files_per_buffer);
 // dict path for chinese analyzer
 DECLARE_String(inverted_index_dict_path);
+// The kuromoji (Japanese) analyzer
+DECLARE_mBool(enable_kuromoji_analyzer);
 DECLARE_Int32(inverted_index_read_buffer_size);
 // tree depth for bkd index
 DECLARE_Int32(max_depth_in_bkd_tree);
@@ -1785,8 +1787,9 @@ DECLARE_mInt64(hive_sink_max_file_size);
 /** Iceberg sink configurations **/
 DECLARE_mInt64(iceberg_sink_max_file_size);
 
-/** Paimon file system configurations **/
-DECLARE_Strings(paimon_file_system_scheme_mappings);
+/** Paimon sink configurations **/
+// Hard upper bound for Doris-managed Paimon write-buffer memory per JNI writer.
+DECLARE_mInt64(paimon_jni_writer_memory_pool_limit_bytes);
 
 // Number of open tries, default 1 means only try to open once.
 // Retry the Open num_retries time waiting 100 milliseconds between retries.
@@ -1982,6 +1985,7 @@ DECLARE_mInt32(concurrency_stats_dump_interval_ms);
 DECLARE_mBool(cloud_mow_sync_rowsets_when_load_txn_begin);
 
 DECLARE_mBool(enable_cloud_make_rs_visible_on_be);
+DECLARE_mBool(enable_cloud_random_segment_id);
 DECLARE_mInt32(file_handles_deplenish_frequency_times);
 
 #ifdef BE_TEST
